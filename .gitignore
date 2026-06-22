@@ -1,0 +1,8 @@
+*.mp4
+*.DS_Store
+weights/
+__pycache__/
+/.omc/
+/.venv/
+/api_work/
+/.idea/
