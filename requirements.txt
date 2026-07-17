@@ -1,4 +1,4 @@
-torch==2.6.0
+torch==2.13.0
 numpy==1.26.4
 transformers==4.41.0
 loguru==0.7.2
