@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>LongCat 数字人创作</title>
+<style>
+  :root {
+    --brand: #1677FF;
+    --brand-dark: #0e5ad6;
+    --bg: #f4f6fa;
+    --card: #ffffff;
+    --text: #1f2329;
+    --muted: #8a919f;
+    --line: #e8ebf0;
+    --ok: #18a058;
+    --warn: #f0a020;
+    --err: #e54848;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 15px;
+    line-height: 1.5;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .app { max-width: 520px; margin: 0 auto; min-height: 100vh; display: flex; flex-direction: column; }
+
+  /* top bar */
+  .topbar {
+    position: sticky; top: 0; z-index: 20;
+    background: linear-gradient(135deg, var(--brand), #4f9bff);
+    color: #fff; padding: 14px 16px; display: flex; align-items: center; gap: 10px;
+    box-shadow: 0 2px 10px rgba(22,119,255,.25);
+  }
+  .topbar h1 { font-size: 17px; margin: 0; font-weight: 700; flex: 1; }
+  .topbar .gear {
+    width: 34px; height: 34px; border-radius: 10px; border: none; background: rgba(255,255,255,.18);
+    color: #fff; font-size: 18px; display: flex; align-items: center; justify-content: center; cursor: pointer;
+  }
+  .conn { font-size: 12px; opacity: .9; display: flex; align-items: center; gap: 6px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #ffd666; }
+  .dot.ok { background: #7bf1a8; }
+  .dot.bad { background: #ff9c9c; }
+
+  /* tabs */
+  .tabs { display: flex; gap: 8px; padding: 12px 16px 0; }
+  .tab {
+    flex: 1; padding: 11px 0; text-align: center; border-radius: 12px 12px 0 0;
+    background: #e9edf4; color: var(--muted); font-weight: 600; cursor: pointer; transition: .2s;
+  }
+  .tab.active { background: var(--card); color: var(--brand); box-shadow: 0 -2px 8px rgba(0,0,0,.04); }
+
+  .panels { background: var(--card); margin: 0 16px 16px; border-radius: 0 0 var(--radius) var(--radius); padding: 16px; box-shadow: 0 4px 18px rgba(20,40,80,.06); }
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  /* sections */
+  .sec { margin-bottom: 18px; }
+  .sec-title { font-size: 13px; font-weight: 700; color: var(--muted); letter-spacing: .5px; margin-bottom: 10px; display: flex; align-items: center; gap: 6px; }
+  .sec-title .req { color: var(--err); font-weight: 700; }
+
+  /* upload tiles */
+  .upload {
+    border: 1.5px dashed var(--line); border-radius: 12px; padding: 14px; text-align: center; cursor: pointer;
+    background: #fafbfd; transition: .15s; position: relative; overflow: hidden;
+  }
+  .upload:active { border-color: var(--brand); background: #f0f6ff; }
+  .upload.has { border-style: solid; border-color: var(--brand); background: #f0f6ff; }
+  .upload .ic { font-size: 26px; }
+  .upload .t1 { font-weight: 600; margin-top: 4px; }
+  .upload .t2 { font-size: 12px; color: var(--muted); margin-top: 2px; word-break: break-all; }
+  .upload img.preview { max-width: 100%; max-height: 150px; border-radius: 8px; margin-top: 6px; }
+  .upload audio.preview { width: 100%; margin-top: 6px; }
+  .upload .clear { position: absolute; top: 6px; right: 6px; width: 22px; height: 22px; border-radius: 50%; border: none; background: rgba(0,0,0,.45); color: #fff; font-size: 13px; cursor: pointer; }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+  /* form controls */
+  label.fld { display: block; margin-bottom: 12px; }
+  label.fld > span { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+  textarea, input[type=text], input[type=number], select {
+    width: 100%; border: 1.5px solid var(--line); border-radius: 10px; padding: 10px 12px;
+    font-size: 15px; font-family: inherit; color: var(--text); background: #fff; outline: none; transition: .15s;
+  }
+  textarea { resize: vertical; min-height: 64px; }
+  textarea:focus, input:focus, select:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(22,119,255,.12); }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+  .seg { display: flex; background: #eef1f6; border-radius: 10px; padding: 3px; gap: 3px; }
+  .seg button { flex: 1; border: none; background: transparent; padding: 9px 0; border-radius: 8px; font-size: 14px; font-weight: 600; color: var(--muted); cursor: pointer; }
+  .seg button.on { background: #fff; color: var(--brand); box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+  details.adv { margin-top: 6px; border-top: 1px dashed var(--line); padding-top: 10px; }
+  details.adv summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--brand); list-style: none; display: flex; align-items: center; gap: 6px; }
+  details.adv summary::-webkit-details-marker { display: none; }
+  details.adv[open] summary .arr { transform: rotate(90deg); }
+  .arr { transition: .2s; }
+
+  .switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
+  .switch input { display: none; }
+  .switch .track { width: 42px; height: 24px; border-radius: 12px; background: #cfd6e0; position: relative; transition: .2s; }
+  .switch .track::after { content: ""; position: absolute; top: 2px; left: 2px; width: 20px; height: 20px; border-radius: 50%; background: #fff; transition: .2s; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
+  .switch input:checked + .track { background: var(--brand); }
+  .switch input:checked + .track::after { transform: translateX(18px); }
+
+  /* submit */
+  .submit {
+    width: 100%; padding: 14px; border: none; border-radius: 12px; background: var(--brand); color: #fff;
+    font-size: 16px; font-weight: 700; cursor: pointer; box-shadow: 0 6px 16px rgba(22,119,255,.3); transition: .15s;
+  }
+  .submit:active { background: var(--brand-dark); transform: translateY(1px); }
+  .submit:disabled { background: #b9c6db; box-shadow: none; cursor: not-allowed; }
+
+  /* result */
+  .result { margin-top: 4px; }
+  .result.hidden { display: none; }
+  .task-card { border: 1px solid var(--line); border-radius: 12px; padding: 14px; background: #fafbfd; }
+  .task-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .task-id { font-size: 12px; color: var(--muted); word-break: break-all; }
+  .badge { font-size: 12px; font-weight: 700; padding: 4px 10px; border-radius: 999px; white-space: nowrap; }
+  .badge.pending { background: #fff3d6; color: #ad6800; }
+  .badge.running { background: #e0efff; color: var(--brand); }
+  .badge.done { background: #def7e6; color: var(--ok); }
+  .badge.failed { background: #fde2e2; color: var(--err); }
+  .progress { height: 6px; border-radius: 4px; background: #e8ebf0; margin: 12px 0 8px; overflow: hidden; }
+  .progress > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--brand), #4f9bff); transition: width .4s; }
+  .progress.running > i { width: 70%; animation: pulse 1.2s infinite; }
+  @keyframes pulse { 0%{opacity:.5} 50%{opacity:1} 100%{opacity:.5} }
+  .meta { font-size: 12px; color: var(--muted); }
+  .log { margin-top: 10px; background: #0f1420; color: #c8d3e6; border-radius: 8px; padding: 10px; font-size: 11px; font-family: ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-all; max-height: 160px; overflow: auto; display: none; }
+  .log.show { display: block; }
+  .loglink { font-size: 12px; color: var(--brand); cursor: pointer; display: inline-block; margin-top: 8px; }
+  video.out { width: 100%; border-radius: 10px; margin-top: 10px; background: #000; }
+  .dl { display: inline-flex; align-items: center; gap: 6px; margin-top: 10px; padding: 9px 14px; border-radius: 10px; background: var(--brand); color: #fff; font-weight: 600; text-decoration: none; font-size: 14px; }
+
+  /* history */
+  .hist { margin: 0 16px 24px; }
+  .hist .sec-title { padding: 0 4px; }
+  .hist-item { background: var(--card); border-radius: 12px; padding: 12px 14px; margin-bottom: 10px; box-shadow: 0 3px 12px rgba(20,40,80,.05); display: flex; align-items: center; gap: 10px; cursor: pointer; }
+  .hist-item .ci { font-size: 22px; }
+  .hist-item .ct { flex: 1; min-width: 0; }
+  .hist-item .ct .n { font-weight: 600; }
+  .hist-item .ct .s { font-size: 12px; color: var(--muted); }
+  .hist-item .badge { font-size: 11px; }
+
+  /* settings modal */
+  .mask { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: none; align-items: center; justify-content: center; z-index: 50; padding: 20px; }
+  .mask.show { display: flex; }
+  .modal { background: #fff; border-radius: 16px; padding: 20px; width: 100%; max-width: 360px; }
+  .modal h3 { margin: 0 0 14px; font-size: 16px; }
+  .modal .submit { margin-top: 6px; }
+
+  .toast { position: fixed; left: 50%; bottom: 30px; transform: translateX(-50%); background: rgba(20,25,35,.92); color: #fff; padding: 11px 18px; border-radius: 10px; font-size: 14px; z-index: 99; opacity: 0; transition: .25s; pointer-events: none; max-width: 90%; text-align: center; }
+  .toast.show { opacity: 1; }
+
+  .banner { margin: 0 16px 12px; padding: 10px 12px; border-radius: 10px; font-size: 13px; display: none; }
+  .banner.show { display: block; }
+  .banner.bad { background: #fde2e2; color: var(--err); }
+  .banner.ok { background: #def7e6; color: var(--ok); }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <h1>🎬 LongCat 数字人创作</h1>
+    <div class="conn"><span class="dot" id="connDot"></span><span id="connText">连接中…</span></div>
+    <button class="gear" id="gearBtn" title="设置">⚙</button>
+  </div>
+
+  <div class="banner" id="banner"></div>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="single">单人数字人</div>
+    <div class="tab" data-tab="multi">多人数字人</div>
+  </div>
+
+  <div class="panels">
+    <!-- ============ 单人数字人 ============ -->
+    <div class="panel active" id="panel-single">
+      <div class="sec">
+        <div class="sec-title">素材上传 <span class="req">*</span></div>
+        <div class="grid2">
+          <div class="upload" id="up-s-img" data-kind="image">
+            <div class="ic">🖼️</div>
+            <div class="t1">肖像图片</div>
+            <div class="t2" id="up-s-img-t">点击上传（ai2v 必填）</div>
+          </div>
+          <div class="upload" id="up-s-aud" data-kind="audio">
+            <div class="ic">🎙️</div>
+            <div class="t1">语音音频</div>
+            <div class="t2" id="up-s-aud-t">点击上传（必填）</div>
+          </div>
+        </div>
+        <input type="file" id="file-s-img" accept="image/*" hidden />
+        <input type="file" id="file-s-aud" accept="audio/*" hidden />
+      </div>
+
+      <div class="sec">
+        <div class="sec-title">创作设置</div>
+        <label class="fld">
+          <span>生成模式</span>
+          <div class="seg" id="seg-s-stage">
+            <button type="button" data-v="ai2v" class="on">图 + 音（ai2v）</button>
+            <button type="button" data-v="at2v">文 + 音（at2v）</button>
+          </div>
+          <div class="hint" id="stage-hint">ai2v：用肖像图片 + 语音生成口型同步的数字人视频（需上传图片）。</div>
+        </label>
+        <label class="fld">
+          <span>画面描述（prompt）</span>
+          <textarea id="s-prompt" placeholder="例如：一位女性在明亮办公室里微笑着讲话，自然光照，电影感">一位人物在自然光下微笑着说话，画面稳定，细节清晰</textarea>
+          <div class="hint">描述动作、场景、风格；不填则使用默认描述。</div>
+        </label>
+        <div class="row">
+          <label class="fld">
+            <span>分辨率</span>
+            <select id="s-res">
+              <option value="480p" selected>480p</option>
+              <option value="720p">720p</option>
+            </select>
+          </label>
+          <label class="fld">
+            <span>模型版本</span>
+            <select id="s-model">
+              <option value="avatar-v1.5" selected>avatar-v1.5</option>
+              <option value="avatar-v1.0">avatar-v1.0</option>
+            </select>
+          </label>
+        </div>
+      </div>
+
+      <details class="adv">
+        <summary><span class="arr">▶</span> 高级参数</summary>
+        <div style="margin-top:12px">
+          <div class="row">
+            <label class="fld"><span>推理步数</span><input type="number" id="s-steps" value="50" min="1" max="100" /></label>
+            <label class="fld"><span>片段数</span><input type="number" id="s-seg" value="1" min="1" max="10" /></label>
+          </div>
+          <div class="row">
+            <label class="fld"><span>文本引导</span><input type="number" step="0.5" id="s-tgs" value="4.0" /></label>
+            <label class="fld"><span>音频引导</span><input type="number" step="0.5" id="s-ags" value="4.0" /></label>
+          </div>
+          <label class="fld"><span>随机种子（seed）</span><input type="number" id="s-seed" value="42" /></label>
+          <label class="switch"><input type="checkbox" id="s-distill" /><span class="track"></span><span>使用蒸馏加速（distill，步数降至 8）</span></label>
+          <div style="height:8px"></div>
+          <label class="switch"><input type="checkbox" id="s-int8" /><span class="track"></span><span>使用 INT8 量化（v1.5，省显存）</span></label>
+        </div>
+      </details>
+
+      <button class="submit" id="btn-s-submit">开始生成</button>
+
+      <div class="result hidden" id="res-s"></div>
+    </div>
+
+    <!-- ============ 多人数字人 ============ -->
+    <div class="panel" id="panel-multi">
+      <div class="sec">
+        <div class="sec-title">素材上传 <span class="req">*</span></div>
+        <div class="upload" id="up-m-img" data-kind="image" style="margin-bottom:10px">
+          <div class="ic">👥</div>
+          <div class="t1">群像图片（含多人的照片）</div>
+          <div class="t2" id="up-m-img-t">点击上传（必填）</div>
+        </div>
+        <input type="file" id="file-m-img" accept="image/*" hidden />
+        <div class="grid2">
+          <div class="upload" id="up-m-aud1" data-kind="audio">
+            <div class="ic">🎙️</div>
+            <div class="t1">人物1 语音</div>
+            <div class="t2" id="up-m-aud1-t">点击上传（必填）</div>
+          </div>
+          <div class="upload" id="up-m-aud2" data-kind="audio">
+            <div class="ic">🎙️</div>
+            <div class="t1">人物2 语音</div>
+            <div class="t2" id="up-m-aud2-t">点击上传（选填）</div>
+          </div>
+        </div>
+        <input type="file" id="file-m-aud1" accept="audio/*" hidden />
+        <input type="file" id="file-m-aud2" accept="audio/*" hidden />
+      </div>
+
+      <div class="sec">
+        <div class="sec-title">创作设置</div>
+        <label class="fld">
+          <span>音频合成方式</span>
+          <div class="seg" id="seg-m-audio">
+            <button type="button" data-v="para" class="on">并列（para）</button>
+            <button type="button" data-v="add">叠加（add）</button>
+          </div>
+          <div class="hint" id="audio-hint">para：两人分别在不同声道/区域说话；add：两段语音叠加混合。</div>
+        </label>
+        <label class="fld">
+          <span>画面描述（prompt）</span>
+          <textarea id="m-prompt" placeholder="例如：两人在客厅里对话，一位穿红衣，一位穿蓝衣">两位人物在自然的场景中对谈，画面稳定，细节清晰</textarea>
+        </label>
+        <div class="row">
+          <label class="fld">
+            <span>分辨率</span>
+            <select id="m-res">
+              <option value="480p" selected>480p</option>
+              <option value="720p">720p</option>
+            </select>
+          </label>
+          <label class="fld">
+            <span>模型版本</span>
+            <select id="m-model">
+              <option value="avatar-v1.5" selected>avatar-v1.5</option>
+              <option value="avatar-v1.0">avatar-v1.0</option>
+            </select>
+          </label>
+        </div>
+      </div>
+
+      <details class="adv">
+        <summary><span class="arr">▶</span> 高级参数</summary>
+        <div style="margin-top:12px">
+          <div class="row">
+            <label class="fld"><span>推理步数</span><input type="number" id="m-steps" value="50" min="1" max="100" /></label>
+            <label class="fld"><span>片段数</span><input type="number" id="m-seg" value="1" min="1" max="10" /></label>
+          </div>
+          <div class="row">
+            <label class="fld"><span>文本引导</span><input type="number" step="0.5" id="m-tgs" value="4.0" /></label>
+            <label class="fld"><span>音频引导</span><input type="number" step="0.5" id="m-ags" value="4.0" /></label>
+          </div>
+          <label class="fld"><span>随机种子（seed）</span><input type="number" id="m-seed" value="42" /></label>
+          <label class="switch"><input type="checkbox" id="m-distill" /><span class="track"></span><span>使用蒸馏加速（distill，步数降至 8）</span></label>
+          <div style="height:8px"></div>
+          <label class="switch"><input type="checkbox" id="m-int8" /><span class="track"></span><span>使用 INT8 量化（v1.5，省显存）</span></label>
+        </div>
+      </details>
+
+      <button class="submit" id="btn-m-submit">开始生成</button>
+
+      <div class="result hidden" id="res-m"></div>
+    </div>
+  </div>
+
+  <div class="hist">
+    <div class="sec-title">历史任务</div>
+    <div id="hist-list"><div class="meta" style="padding:4px">暂无任务</div></div>
+  </div>
+</div>
+
+<!-- settings -->
+<div class="mask" id="settingsMask">
+  <div class="modal">
+    <h3>⚙ API 设置</h3>
+    <label class="fld">
+      <span>API 地址</span>
+      <input type="text" id="apiBase" placeholder="http://localhost:8000" />
+      <div class="hint">本地默认 http://localhost:8000；部署到远程 GPU 服务器时改为该服务器地址。</div>
+    </label>
+    <button class="submit" id="saveApi">保存</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+const $ = (s, r=document) => r.querySelector(s);
+const $$ = (s, r=document) => Array.from(r.querySelectorAll(s));
+
+let API_BASE = localStorage.getItem("lc_api_base") || "";
+// When served by the API itself, use same-origin (relative) URLs; otherwise
+// fall back to the conventional localhost:8000 so the standalone preview still works.
+async function detectBase() {
+  if (API_BASE) return API_BASE;
+  try {
+    const r = await fetch("/health");
+    if (r.ok) { API_BASE = ""; return API_BASE; }
+  } catch (e) {}
+  API_BASE = "http://" + location.hostname + ":8000";
+  return API_BASE;
+}
+
+// ---------- helpers ----------
+function toast(msg) {
+  const t = $("#toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(t._t); t._t = setTimeout(() => t.classList.remove("show"), 2200);
+}
+function setBanner(type, msg) {
+  const b = $("#banner");
+  if (!msg) { b.className = "banner"; return; }
+  b.className = "banner show " + type; b.textContent = msg;
+}
+async function api(path, opts) {
+  const url = API_BASE.replace(/\/$/, "") + path;
+  const r = await fetch(url, opts);
+  if (!r.ok) {
+    let detail = "";
+    try { const j = await r.json(); detail = j.detail || ""; } catch (e) {}
+    throw new Error(detail || ("HTTP " + r.status));
+  }
+  const ct = r.headers.get("content-type") || "";
+  return ct.includes("application/json") ? r.json() : r.text();
+}
+
+// ---------- connection check ----------
+async function checkConn() {
+  try {
+    const info = await api("/health");
+    $("#connDot").className = "dot ok";
+    $("#connText").textContent = (info.num_gpus || "?") + " GPU · " + (info.version || "");
+    setBanner("ok", "已连接 API：" + (info.service || "") + "（" + (info.num_gpus||"?") + " 卡）");
+    setTimeout(() => setBanner("", ""), 2600);
+    loadHistory();
+  } catch (e) {
+    $("#connDot").className = "dot bad";
+    $("#connText").textContent = "未连接";
+    setBanner("bad", "无法连接 API（" + API_BASE + "）：" + e.message + " — 请确认服务已启动，或在 ⚙ 中修改地址。");
+  }
+}
+
+// ---------- tabs ----------
+$$(".tab").forEach(tab => tab.addEventListener("click", () => {
+  $$(".tab").forEach(t => t.classList.remove("active"));
+  tab.classList.add("active");
+  const which = tab.dataset.tab;
+  $$(".panel").forEach(p => p.classList.remove("active"));
+  $("#panel-" + which).classList.add("active");
+}));
+
+// ---------- segmented controls ----------
+function bindSeg(id, cb) {
+  const seg = $("#" + id);
+  seg.querySelectorAll("button").forEach(b => b.addEventListener("click", () => {
+    seg.querySelectorAll("button").forEach(x => x.classList.remove("on"));
+    b.classList.add("on");
+    cb(b.dataset.v);
+  }));
+}
+let sStage = "ai2v";
+bindSeg("seg-s-stage", v => {
+  sStage = v;
+  if (v === "ai2v") {
+    $("#stage-hint").textContent = "ai2v：用肖像图片 + 语音生成口型同步的数字人视频（需上传图片）。";
+    $("#up-s-img").style.opacity = "1";
+  } else {
+    $("#stage-hint").textContent = "at2v：仅凭语音 + 文字描述生成数字人视频（无需肖像图片）。";
+    $("#up-s-img").style.opacity = ".5";
+  }
+});
+let mAudio = "para";
+bindSeg("seg-m-audio", v => {
+  mAudio = v;
+  $("#audio-hint").textContent = v === "para"
+    ? "para：两人分别在不同区域说话（并列）。"
+    : "add：两段语音叠加混合成同一音轨。";
+});
+
+// ---------- file upload ----------
+const uploads = {
+  "up-s-img": { path: null, file: null },
+  "up-s-aud": { path: null, file: null },
+  "up-m-img": { path: null, file: null },
+  "up-m-aud1": { path: null, file: null },
+  "up-m-aud2": { path: null, file: null },
+};
+
+$$(".upload").forEach(el => {
+  const kind = el.dataset.kind;
+  const id = el.id;
+  el.addEventListener("click", (e) => {
+    if (e.target.classList.contains("clear")) return;
+    $("#file-" + id.replace("up-", "")).click();
+  });
+  $("#file-" + id.replace("up-", "")).addEventListener("change", (e) => {
+    const f = e.target.files[0];
+    if (f) handleUpload(id, kind, f);
+    e.target.value = "";
+  });
+});
+
+async function handleUpload(id, kind, file) {
+  const el = $("#" + id);
+  el.classList.add("has");
+  // preview
+  let previewHtml = "";
+  if (kind === "image") previewHtml = `<img class="preview" src="${URL.createObjectURL(file)}" />`;
+  else previewHtml = `<audio class="preview" controls src="${URL.createObjectURL(file)}"></audio>`;
+  el.innerHTML = `<button class="clear" data-id="${id}">✕</button>` +
+    `<div class="t1">${file.name}</div><div class="t2">${(file.size/1024/1024).toFixed(2)} MB</div>` + previewHtml;
+  // bind clear
+  el.querySelector(".clear").addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    clearUpload(id, kind);
+  });
+  try {
+    const fd = new FormData();
+    fd.append("file", file);
+    const endpoint = kind === "image" ? "/files/image" : "/files/audio";
+    const res = await api(endpoint, { method: "POST", body: fd });
+    uploads[id] = { path: res.path, file: file.name };
+    toast("上传成功：" + file.name);
+  } catch (e) {
+    clearUpload(id, kind);
+    toast("上传失败：" + e.message);
+  }
+}
+function clearUpload(id, kind) {
+  uploads[id] = { path: null, file: null };
+  const label = kind === "image"
+    ? (id === "up-m-img" ? "点击上传（必填）" : "点击上传（ai2v 必填）")
+    : (id === "up-m-aud2" ? "点击上传（选填）" : "点击上传（必填）");
+  const ic = kind === "image" ? (id === "up-m-img" ? "👥" : "🖼️") : "🎙️";
+  const t1 = kind === "image"
+    ? (id === "up-m-img" ? "群像图片（含多人的照片）" : "肖像图片")
+    : (id === "up-m-aud2" ? "人物2 语音" : (id === "up-m-aud1" ? "人物1 语音" : "语音音频"));
+  const el = $("#" + id);
+  el.classList.remove("has");
+  el.innerHTML = `<div class="ic">${ic}</div><div class="t1">${t1}</div><div class="t2" id="${id}-t">${label}</div>`;
+}
+
+// ---------- submit ----------
+$("#btn-s-submit").addEventListener("click", () => submitSingle());
+$("#btn-m-submit").addEventListener("click", () => submitMulti());
+
+function num(id, d) { const v = parseFloat($("#" + id).value); return isNaN(v) ? d : v; }
+
+async function submitSingle() {
+  if (!uploads["up-s-aud"].path) return toast("请先上传语音音频");
+  if (sStage === "ai2v" && !uploads["up-s-img"].path) return toast("ai2v 模式需上传肖像图片（或切到 文+音 模式）");
+  const body = {
+    prompt: $("#s-prompt").value.trim(),
+    cond_audio: { person1: uploads["up-s-aud"].path },
+    stage_1: sStage,
+    resolution: $("#s-res").value,
+    model_type: $("#s-model").value,
+    num_segments: Math.max(1, parseInt($("#s-seg").value) || 1),
+    num_inference_steps: Math.max(1, parseInt($("#s-steps").value) || 50),
+    text_guidance_scale: num("s-tgs", 4.0),
+    audio_guidance_scale: num("s-ags", 4.0),
+    seed: parseInt($("#s-seed").value) || 42,
+    use_distill: $("#s-distill").checked,
+    use_int8: $("#s-int8").checked,
+  };
+  if (sStage === "ai2v") body.cond_image = uploads["up-s-img"].path;
+  await createTask("avatar-single", body, "#res-s");
+}
+
+async function submitMulti() {
+  if (!uploads["up-m-img"].path) return toast("请先上传群像图片");
+  if (!uploads["up-m-aud1"].path && !uploads["up-m-aud2"].path) return toast("请至少上传人物1 或 人物2 的语音");
+  const cond_audio = { person1: uploads["up-m-aud1"].path };
+  if (uploads["up-m-aud2"].path) cond_audio.person2 = uploads["up-m-aud2"].path;
+  const body = {
+    prompt: $("#m-prompt").value.trim(),
+    cond_image: uploads["up-m-img"].path,
+    cond_audio,
+    audio_type: mAudio,
+    resolution: $("#m-res").value,
+    model_type: $("#m-model").value,
+    num_segments: Math.max(1, parseInt($("#m-seg").value) || 1),
+    num_inference_steps: Math.max(1, parseInt($("#m-steps").value) || 50),
+    text_guidance_scale: num("m-tgs", 4.0),
+    audio_guidance_scale: num("m-ags", 4.0),
+    seed: parseInt($("#m-seed").value) || 42,
+    use_distill: $("#m-distill").checked,
+    use_int8: $("#m-int8").checked,
+  };
+  await createTask("avatar-multi", body, "#res-m");
+}
+
+const pollers = {};
+async function createTask(type, body, resSel) {
+  const box = $(resSel);
+  box.classList.remove("hidden");
+  box.innerHTML = `<div class="task-card"><div class="meta">提交中…</div></div>`;
+  try {
+    const res = await api("/generate/" + type, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    renderResult(box, res.task_id, "pending");
+    pollTask(res.task_id, box);
+    loadHistory();
+  } catch (e) {
+    box.innerHTML = `<div class="task-card"><div class="badge failed">提交失败</div><div class="meta" style="margin-top:8px">${e.message}</div></div>`;
+    toast("提交失败：" + e.message);
+  }
+}
+
+function renderResult(box, taskId, status, data) {
+  const label = { pending: "排队中", running: "生成中", done: "已完成", failed: "失败" }[status] || status;
+  let html = `<div class="task-card">
+    <div class="task-head">
+      <div class="task-id">任务 ID：<br>${taskId}</div>
+      <div class="badge ${status}">${label}</div>
+    </div>
+    <div class="progress ${status === "running" ? "running" : ""}"><i style="width:${status==="done"?100:status==="running"?70:status==="pending"?20:0}%"></i></div>`;
+  if (data) {
+    if (data.started_at) html += `<div class="meta">开始：${new Date(data.started_at*1000).toLocaleTimeString()}</div>`;
+    if (data.finished_at) html += `<div class="meta">结束：${new Date(data.finished_at*1000).toLocaleTimeString()}</div>`;
+  }
+  html += `<span class="loglink" data-id="${taskId}">查看运行日志 ▾</span>
+    <div class="log" id="log-${taskId}"></div>`;
+  if (status === "done" && data && data.outputs && data.outputs.length) {
+    const out = data.outputs[0];
+    const url = API_BASE.replace(/\/$/, "") + out.download_url;
+    html += `<video class="out" controls src="${url}"></video>
+      <br><a class="dl" href="${url}" download="${out.filename}">⬇ 下载视频（${out.filename}）</a>`;
+  }
+  if (status === "failed" && data && data.error) {
+    html += `<div class="meta" style="margin-top:8px;color:var(--err)">错误：${data.error}</div>`;
+  }
+  html += `</div>`;
+  box.innerHTML = html;
+  box.querySelector(".loglink").addEventListener("click", () => toggleLog(taskId));
+}
+
+async function toggleLog(taskId) {
+  const log = $("#log-" + taskId);
+  if (log.classList.contains("show")) { log.classList.remove("show"); return; }
+  try {
+    const r = await api("/tasks/" + taskId + "/log");
+    log.textContent = r.log || "（暂无日志）";
+  } catch (e) { log.textContent = "日志读取失败：" + e.message; }
+  log.classList.add("show");
+}
+
+async function pollTask(taskId, box) {
+  if (pollers[taskId]) clearInterval(pollers[taskId]);
+  pollers[taskId] = setInterval(async () => {
+    try {
+      const d = await api("/tasks/" + taskId);
+      renderResult(box, taskId, d.status, d);
+      if (d.status === "done" || d.status === "failed") {
+        clearInterval(pollers[taskId]);
+        delete pollers[taskId];
+        loadHistory();
+      }
+    } catch (e) { /* ignore transient */ }
+  }, 2500);
+}
+
+// ---------- history ----------
+const TYPE_ICON = { avatar_single: "🧍", avatar_multi: "👥", text_to_video: "📝", image_to_video: "🖼️", video_continuation: "🎞️" };
+const TYPE_NAME = { avatar_single: "单人数字人", avatar_multi: "多人数字人", text_to_video: "文生视频", image_to_video: "图生视频", video_continuation: "视频续写" };
+async function loadHistory() {
+  try {
+    const r = await api("/tasks?limit=20");
+    const list = r.tasks || [];
+    const el = $("#hist-list");
+    if (!list.length) { el.innerHTML = `<div class="meta" style="padding:4px">暂无任务</div>`; return; }
+    el.innerHTML = list.map(t => {
+      const st = t.status;
+      const lbl = { pending: "排队中", running: "生成中", done: "已完成", failed: "失败" }[st] || st;
+      const name = TYPE_NAME[t.task_type] || t.task_type;
+      const ic = TYPE_ICON[t.task_type] || "🎬";
+      const time = t.created_at ? new Date(t.created_at*1000).toLocaleString() : "";
+      return `<div class="hist-item" data-id="${t.task_id}">
+        <div class="ci">${ic}</div>
+        <div class="ct"><div class="n">${name}</div><div class="s">${time}</div></div>
+        <div class="badge ${st}">${lbl}</div>
+      </div>`;
+    }).join("");
+    el.querySelectorAll(".hist-item").forEach(it => it.addEventListener("click", () => {
+      const id = it.dataset.id;
+      // jump to matching panel result box
+      const t = list.find(x => x.task_id === id);
+      const box = t && t.task_type === "avatar_multi" ? $("#res-m") : $("#res-s");
+      box.classList.remove("hidden");
+      renderResult(box, id, t.status, t);
+      if (t.status === "pending" || t.status === "running") pollTask(id, box);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }));
+  } catch (e) { /* ignore */ }
+}
+
+// ---------- settings ----------
+$("#gearBtn").addEventListener("click", () => {
+  $("#apiBase").value = API_BASE;
+  $("#settingsMask").classList.add("show");
+});
+$("#settingsMask").addEventListener("click", (e) => { if (e.target === $("#settingsMask")) $("#settingsMask").classList.remove("show"); });
+$("#saveApi").addEventListener("click", () => {
+  API_BASE = $("#apiBase").value.trim() || "http://localhost:8000";
+  localStorage.setItem("lc_api_base", API_BASE);
+  $("#settingsMask").classList.remove("show");
+  toast("已保存 API 地址");
+  checkConn();
+});
+
+// ---------- init ----------
+detectBase().then(() => checkConn());
+</script>
+</body>
+</html>

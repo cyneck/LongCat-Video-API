@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+<title>登录 · LongCat 数字人创作</title>
+<style>
+  :root { --brand:#1677FF; --brand-dark:#0e5ad6; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: linear-gradient(135deg, #1677FF, #4f9bff);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", Roboto, sans-serif;
+    padding: 16px;
+  }
+  .card {
+    width: 100%; max-width: 360px; background: #fff; border-radius: 18px; padding: 30px 24px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.25); text-align: center;
+  }
+  .logo { font-size: 44px; }
+  .card h1 { margin: 8px 0 2px; font-size: 20px; color: #1f2329; }
+  .sub { margin: 0 0 22px; color: #8a919f; font-size: 14px; }
+  form { display: block; text-align: left; }
+  label { display: block; margin-bottom: 14px; font-size: 13px; font-weight: 600; color: #1f2329; }
+  input {
+    width: 100%; margin-top: 6px; padding: 12px 14px; border: 1.5px solid #e8ebf0; border-radius: 10px;
+    font-size: 15px; outline: none; transition: .15s;
+  }
+  input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(22,119,255,.12); }
+  button {
+    width: 100%; margin-top: 6px; padding: 13px; border: none; border-radius: 12px; background: var(--brand);
+    color: #fff; font-size: 16px; font-weight: 700; cursor: pointer; box-shadow: 0 6px 16px rgba(22,119,255,.3);
+  }
+  button:active { background: var(--brand-dark); }
+  .tip { margin: 16px 0 0; font-size: 12px; color: #8a919f; text-align: center; }
+  .err { margin: 0 0 14px; color: #e54848; font-size: 13px; text-align: center; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">🎬</div>
+    <h1>LongCat 数字人创作</h1>
+    <p class="sub">请登录后使用</p>
+    <div class="err">{{error}}</div>
+    <form method="post" action="/auth/login">
+      <label>账号
+        <input type="text" name="username" required autocomplete="username" placeholder="用户名" />
+      </label>
+      <label>密码
+        <input type="password" name="password" required autocomplete="current-password" placeholder="密码" />
+      </label>
+      <button type="submit">登 录</button>
+    </form>
+    <p class="tip">默认账号 / 密码：admin / admin<br/>部署时请通过环境变量 LONGCAT_USER / LONGCAT_PASS / LONGCAT_AUTH_TOKEN 修改</p>
+  </div>
+</body>
+</html>

@@ -70,3 +70,14 @@ TASK_CHECKPOINT = {
     "avatar_single": CHECKPOINT_DIR_AVATAR,
     "avatar_multi": CHECKPOINT_DIR_AVATAR,
 }
+
+# --- optional: H5 embedding + simple login gate ---
+# Flip on for production: LONGCAT_EMBED_H5=1 serves the H5 at "/",
+# LONGCAT_AUTH=1 requires login (cookie) before any endpoint.
+AUTH_ENABLED = os.environ.get("LONGCAT_AUTH", "0") == "1"
+AUTH_USER = os.environ.get("LONGCAT_USER", "admin")
+AUTH_PASS = os.environ.get("LONGCAT_PASS", "admin")
+AUTH_TOKEN = os.environ.get("LONGCAT_AUTH_TOKEN", "longcat-demo-token")  # secret stored in the HttpOnly cookie
+EMBED_H5 = os.environ.get("LONGCAT_EMBED_H5", "0") == "1"
+H5_DIR = REPO_ROOT / "h5"
+HEALTH_PATH = "/health"

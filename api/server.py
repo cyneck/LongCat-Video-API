@@ -27,8 +27,8 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Request, Form
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import config
@@ -43,6 +43,46 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# --------------------------------------------------------------------------- #
+# optional: simple login gate + H5 embedding
+# --------------------------------------------------------------------------- #
+@app.middleware("http")
+async def auth_gate(request: Request, call_next):
+    """Block every route (except health/login) behind a cookie when AUTH_ENABLED."""
+    if not config.AUTH_ENABLED:
+        return await call_next(request)
+    path = request.url.path
+    if path in (config.HEALTH_PATH, "/login", "/auth/login"):
+        return await call_next(request)
+    if request.cookies.get("lc_token") != config.AUTH_TOKEN:
+        if path == "/" or path.startswith("/h5"):
+            return RedirectResponse("/login")
+        return JSONResponse(status_code=401, content={"detail": "unauthorized"})
+    return await call_next(request)
+
+
+def _service_info():
+    return {
+        "service": "LongCat-Video API",
+        "version": "0.1.0",
+        "num_gpus": config.NUM_GPUS,
+        "gpu_concurrency": config.GPU_CONCURRENCY,
+        "auth": config.AUTH_ENABLED,
+        "endpoints": [
+            "/files/image", "/files/video", "/files/audio", "/files/json",
+            "/generate/text-to-video", "/generate/image-to-video",
+            "/generate/video-continuation", "/generate/avatar-single",
+            "/generate/avatar-multi",
+            "/tasks", "/tasks/{id}", "/tasks/{id}/files/{filename}", "/tasks/{id}/log",
+        ],
+    }
+
+
+@app.get(config.HEALTH_PATH)
+def health():
+    return _service_info()
 
 
 # --------------------------------------------------------------------------- #
@@ -85,19 +125,31 @@ def _enqueue(task_type: str, task_input: dict):
 # --------------------------------------------------------------------------- #
 @app.get("/")
 def root():
-    return {
-        "service": "LongCat-Video API",
-        "version": "0.1.0",
-        "num_gpus": config.NUM_GPUS,
-        "gpu_concurrency": config.GPU_CONCURRENCY,
-        "endpoints": [
-            "/files/image", "/files/video", "/files/audio", "/files/json",
-            "/generate/text-to-video", "/generate/image-to-video",
-            "/generate/video-continuation", "/generate/avatar-single",
-            "/generate/avatar-multi",
-            "/tasks", "/tasks/{id}", "/tasks/{id}/files/{filename}", "/tasks/{id}/log",
-        ],
-    }
+    if config.EMBED_H5 and (config.H5_DIR / "index.html").exists():
+        return FileResponse(str(config.H5_DIR / "index.html"))
+    return _service_info()
+
+
+@app.get("/login")
+def login_page():
+    if not config.EMBED_H5 or not (config.H5_DIR / "login.html").exists():
+        return HTMLResponse("<p>未启用 H5 嵌入（请设置 LONGCAT_EMBED_H5=1）。</p>")
+    return FileResponse(str(config.H5_DIR / "login.html"))
+
+
+@app.post("/auth/login")
+def do_login(username: str = Form(...), password: str = Form(...)):
+    if username == config.AUTH_USER and password == config.AUTH_PASS:
+        resp = RedirectResponse("/", status_code=303)
+        resp.set_cookie(
+            "lc_token", config.AUTH_TOKEN,
+            httponly=True, samesite="lax", max_age=60 * 60 * 24 * 7,
+        )
+        return resp
+    return HTMLResponse(
+        "<p style='color:#e54848'>账号或密码错误</p><p><a href='/login'>返回重试</a></p>",
+        status_code=401,
+    )
 
 
 # --------------------------------------------------------------------------- #
