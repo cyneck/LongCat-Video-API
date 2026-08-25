@@ -123,6 +123,9 @@ huggingface-cli download meituan-longcat/LongCat-Video-Avatar-1.5 \
 - 权重默认读取目录：`weights/LongCat-Video`（视频）与 `weights/LongCat-Video-Avatar-1.5`（数字人），可用环境变量 `LONGCAT_CHECKPOINT_DIR_VIDEO` / `LONGCAT_CHECKPOINT_DIR_AVATAR` 覆盖。
 - 若用旧版数字人 v1.0，把 `LONGCAT_CHECKPOINT_DIR_AVATAR` 指向 `weights/LongCat-Video-Avatar`，并在请求里设 `"model_type":"avatar-v1.0"`。
 
+> ⚠️ **数字人强依赖基础视频模型（关键坑）**：`api/scripts/run_avatar_*.py` 里 tokenizer / text_encoder / vae / scheduler 是**写死**从 `os.path.join(checkpoint_dir, "..", "LongCat-Video")` 读取的，即必须是 avatar 目录的**兄弟目录** `weights/LongCat-Video`。哪怕你把 `LONGCAT_CHECKPOINT_DIR_VIDEO` 指到别处也没用——脚本不读这个变量。所以**两个权重都必须下载，且基础模型必须位于 `weights/LongCat-Video`**（与 `weights/LongCat-Video-Avatar-1.5` 同级）。缺它会报 `OSError: Incorrect path_or_model_id: '.../LongCat-Video-Avatar-1.5/../LongCat-Video'`。
+> 验证：`ls weights/LongCat-Video/tokenizer weights/LongCat-Video/text_encoder weights/LongCat-Video/vae weights/LongCat-Video/scheduler` 都应存在。
+
 ---
 
 ## 3. 生产配置（环境变量）
