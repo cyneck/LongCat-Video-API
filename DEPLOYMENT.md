@@ -173,6 +173,45 @@ hf-download meituan-longcat/LongCat-Video-Avatar-1.5 ./weights/LongCat-Video-Ava
 | `LONGCAT_CHECKPOINT_DIR_AVATAR_V15` | `weights/LongCat-Video-Avatar-1.5` | 按实际改 | 数字人 **v1.5** 权重目录（默认）；请求 `model_type:"avatar-v1.5"` 时自动选用 |
 | `LONGCAT_CHECKPOINT_DIR_AVATAR` | _(未设置)_ | 一般不需要 | 旧版总开关：一旦设置会**同时覆盖 v1.0 与 v1.5**（保持向后兼容），优先级高于上面两个分版本变量 |
 
+### 3.1 鉴权配置速查（直接抄）
+
+**最小必配（开启鉴权门禁）**：
+
+| 变量 | 值 | 说明 |
+|---|---|---|
+| `LONGCAT_AUTH` | `1` | 开启登录网关，未登录拦截所有接口 |
+| `LONGCAT_USER` | 自定义 | 登录账号 |
+| `LONGCAT_PASS` | 强密码 | 登录密码 |
+| `LONGCAT_EMBED_H5` | `1` | 提供 H5 登录页（浏览器访问 `/` 时跳 `/login`） |
+
+**等价命令行参数**（`python -m api.server --auth --user X --pass Y --embed-h5` 与上面四个环境变量完全等价；**命令行参数优先于环境变量**）：
+
+| 命令行参数 | 等价环境变量 |
+|---|---|
+| `--auth` | `LONGCAT_AUTH=1` |
+| `--user NAME` | `LONGCAT_USER=NAME` |
+| `--pass PWD`（别名 `--password`） | `LONGCAT_PASS=PWD` |
+| `--token TOK` | `LONGCAT_AUTH_TOKEN=TOK` |
+| `--embed-h5` | `LONGCAT_EMBED_H5=1` |
+
+**systemd 写法**（追加到 §4.2 的 `[Service]` 段）：
+
+```ini
+Environment=LONGCAT_AUTH=1
+Environment=LONGCAT_USER=admin
+Environment=LONGCAT_PASS=改成强密码
+Environment=LONGCAT_EMBED_H5=1
+```
+
+**启动验证**：
+
+```bash
+curl -s http://127.0.0.1:8080/health        # 应返回 "auth": true
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/tasks   # 无 cookie -> 401
+curl -s -c /tmp/cj -X POST -d 'username=admin&password=改成强密码' http://127.0.0.1:8080/auth/login
+curl -s -b /tmp/cj http://127.0.0.1:8080/tasks    # 带 cookie -> 200
+```
+
 > H5 页面用的是**相对地址**（`fetch("/health")`、上传 `/files/*`），所以改端口 / 反代域名对前端完全透明，无需改代码。
 
 ---

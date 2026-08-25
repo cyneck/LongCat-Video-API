@@ -3,7 +3,16 @@
 Run with:
     uvicorn api.server:app --host 0.0.0.0 --port 8000
 or
-    python -m api.server
+    python -m api.server                          # env-driven config
+    python -m api.server --auth --user admin --pass 's3cret' --embed-h5
+    python -m api.server --auth --port 9000       # CLI params win over env
+
+Auth (CLI flags mirror the LONGCAT_* env vars, CLI takes priority):
+    --auth             enable the login gate        (LONGCAT_AUTH=1)
+    --user NAME        login account                (LONGCAT_USER)
+    --pass PWD         login password               (LONGCAT_PASS)
+    --token TOK        login cookie token           (LONGCAT_AUTH_TOKEN)
+    --embed-h5         serve H5 UI + /login page    (LONGCAT_EMBED_H5=1)
 
 Endpoints:
     GET  /                       health / info
@@ -302,8 +311,57 @@ def task_log(task_id: str):
 
 
 def main():
+    import argparse
     import uvicorn
-    uvicorn.run("api.server:app", host=config.HOST, port=config.PORT, reload=False)
+
+    p = argparse.ArgumentParser(
+        prog="python -m api.server",
+        description="LongCat-Video API 服务（鉴权参数与 LONGCAT_* 环境变量等价，命令行优先）",
+    )
+    p.add_argument("--host", default=None, help="监听地址（默认取 LONGCAT_HOST / 0.0.0.0）")
+    p.add_argument("--port", type=int, default=None, help="监听端口（默认取 LONGCAT_PORT / 8000）")
+    p.add_argument("--auth", action="store_true", help="开启鉴权门禁（等价 LONGCAT_AUTH=1）")
+    p.add_argument("--user", default=None, help="鉴权账号（默认 admin）")
+    p.add_argument("--pass", "--password", dest="password", default=None, help="鉴权密码（默认 admin）")
+    p.add_argument("--token", default=None, help="登录 cookie token（默认 longcat-demo-token）")
+    p.add_argument("--embed-h5", action="store_true", help="嵌入 H5 页面与登录页（等价 LONGCAT_EMBED_H5=1）")
+    p.add_argument("--reload", action="store_true", help="开发模式热重载")
+    args = p.parse_args()
+
+    # CLI wins over env: write through to os.environ so a reload worker
+    # (which re-imports config from the environment) inherits the same values,
+    # then re-sync the already-imported config module for the current process.
+    if args.auth:
+        os.environ["LONGCAT_AUTH"] = "1"
+    if args.embed_h5:
+        os.environ["LONGCAT_EMBED_H5"] = "1"
+    if args.user is not None:
+        os.environ["LONGCAT_USER"] = args.user
+    if args.password is not None:
+        os.environ["LONGCAT_PASS"] = args.password
+    if args.token is not None:
+        os.environ["LONGCAT_AUTH_TOKEN"] = args.token
+
+    config.AUTH_ENABLED = os.environ.get("LONGCAT_AUTH", "0") == "1"
+    config.EMBED_H5 = os.environ.get("LONGCAT_EMBED_H5", "0") == "1"
+    config.AUTH_USER = os.environ.get("LONGCAT_USER", config.AUTH_USER)
+    config.AUTH_PASS = os.environ.get("LONGCAT_PASS", config.AUTH_PASS)
+    config.AUTH_TOKEN = os.environ.get("LONGCAT_AUTH_TOKEN", config.AUTH_TOKEN)
+
+    if config.AUTH_ENABLED:
+        print(
+            f"[longcat] 鉴权已开启: 账号={config.AUTH_USER!r} 密码={config.AUTH_PASS!r}\n"
+            f"[longcat]   - H5 访问入口 /login（需 LONGCAT_EMBED_H5=1 或 --embed-h5）\n"
+            f"[longcat]   - API 调用: POST /auth/login 拿 cookie（账号密码表单）后携带访问",
+            flush=True,
+        )
+
+    uvicorn.run(
+        "api.server:app",
+        host=args.host or config.HOST,
+        port=args.port or config.PORT,
+        reload=args.reload,
+    )
 
 
 if __name__ == "__main__":
