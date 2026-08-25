@@ -64,6 +64,26 @@ uvicorn api.server:app --host 0.0.0.0 --port 8000
 
 打开 `http://localhost:8000/docs` 即可在浏览器里调试全部接口。
 
+> **生产部署（GPU 服务器 + H5 对外服务 + 登录网关）请看根目录 [`DEPLOYMENT.md`](../DEPLOYMENT.md)**，里面包含依赖安装修正（flash-attn 预编译 wheel / ABI 坑）、权重下载、systemd 守护、Nginx 反代与排错。
+
+## H5 嵌入与登录网关
+
+本服务内置一个移动端「数字人创作」H5 页面（`h5/index.html`）和一个登录页（`h5/login.html`），通过环境变量一键启用，无需单独部署前端。
+
+- **开启 H5**：`LONGCAT_EMBED_H5=1` → `GET /` 返回 `h5/index.html`。页面使用相对地址（`/health`、`/files/*`、`/generate/*`），因此无论服务跑在 `8000` / `8080` 还是 Nginx 反代域名下都无需改代码。
+- **开启登录网关**：`LONGCAT_AUTH=1` → 中间件拦截所有接口（除 `/health`、`/login`、`/auth/login`）。未登录访问 `/` 或 `/h5*` 会 `307` 跳到 `/login`；访问 API 会返回 `401`。
+- **登录流程**：浏览器访问 `/login` → 提交 `LONGCAT_USER` / `LONGCAT_PASS` → 服务端在校验通过后向客户端种下 HttpOnly cookie（`lc_token`）→ 重定向回 `/` 加载 H5。cookie 有效期 7 天。
+
+启动示例（容器暴露 8080、需登录）：
+
+```shell
+export LONGCAT_PORT=8080 LONGCAT_EMBED_H5=1 LONGCAT_AUTH=1
+export LONGCAT_USER=admin LONGCAT_PASS='改成强密码'
+uvicorn api.server:app --host 0.0.0.0 --port 8080
+```
+
+> 注意：`LONGCAT_AUTH_TOKEN` 是 cookie 里存的实际令牌串，默认 `longcat-demo-token`。若不修改，知道令牌的人可绕过登录页直接带 cookie 访问；生产环境建议改成一个随机串。
+
 ## 配置项
 
 均通过环境变量覆盖，定义见 `api/config.py`。
@@ -77,7 +97,11 @@ uvicorn api.server:app --host 0.0.0.0 --port 8000
 | `LONGCAT_GPU_CONCURRENCY` | `1` | 同时执行的生成任务数（默认串行） |
 | `LONGCAT_ENABLE_COMPILE` | `0` | 是否对视频任务启用 `torch.compile`（avatar 脚本不支持） |
 | `LONGCAT_WORK_DIR` | `./api_work` | 上传 / 输出 / 日志根目录 |
-| `LONGCAT_HOST` / `LONGCAT_PORT` | `0.0.0.0` / `8000` | 监听地址与端口 |
+| `LONGCAT_HOST` / `LONGCAT_PORT` | `0.0.0.0` / `8000` | 监听地址与端口（代码无硬编码，改 `LONGCAT_PORT` 即可换端口） |
+| `LONGCAT_EMBED_H5` | `0` | 置 `1` 时 `/` 直接返回 `h5/index.html`（数字人创作页） |
+| `LONGCAT_AUTH` | `0` | 置 `1` 时开启登录网关，未登录拦截除 `/health`、`/login`、`/auth/login` 外的全部接口 |
+| `LONGCAT_USER` / `LONGCAT_PASS` | `admin` / `admin` | 登录账号 / 密码（生产请改掉默认值） |
+| `LONGCAT_AUTH_TOKEN` | `longcat-demo-token` | 登录后写入 HttpOnly cookie 的令牌值，可自定义 |
 
 > **avatar 版本切换**：默认指向 `LongCat-Video-Avatar-1.5`。若用 v1.0，把 `LONGCAT_CHECKPOINT_DIR_AVATAR` 指到 `weights/LongCat-Video-Avatar`，并在请求里设 `"model_type":"avatar-v1.0"`。
 

@@ -56,6 +56,8 @@ For more detail, please refer to the comprehensive [***LongCat-Video Technical R
 
 ### Installation
 
+> **跑本仓库的 HTTP API + 内置 H5 页面（推荐）**：上游下面这套 `pip install flash_attn==2.7.4.post1` 会从源码编译（慢且易失败）。请直接看 **[`DEPLOYMENT.md`](DEPLOYMENT.md)**，里面给出「先装预编译 wheel（`cu12torch2.6cxx11abiFALSE-cp312`）再装其余依赖」的修正步骤、GPU/权重要求和登录网关配置。
+
 Clone the repo:
 
 ```shell
