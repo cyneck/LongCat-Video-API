@@ -266,6 +266,14 @@ pip uninstall -y flash-attn
 # 重装 1.3 节的 cxx11abiFALSE wheel
 ```
 
+**Q1b. 推理子进程报 `ModuleNotFoundError: No module named 'longcat_video'`**
+推理脚本在 `api/scripts/` 下，只把脚本自身目录放进 `sys.path`，而 `longcat_video` 包在仓库根，导致 torchrun 子进程找不到它。仓库已在 `api/task_manager.py` 拉起子进程时自动把仓库根加入 `PYTHONPATH`（见第 1 节依赖 / 第 4 节启动）。若你仍遇到：
+- 先 `git pull` 确保已包含该修复（`api/task_manager.py` 的 `env["PYTHONPATH"]` 设置）；
+- 或临时手动验证：`PYTHONPATH=/opt/ml/cctv/LongCat-Video-API torchrun ... api/scripts/run_avatar_single.py ...`。
+- 直接 `python api/scripts/run_avatar_single.py`（不经过服务）也会报同样的错，因为它依赖服务注入的 `PYTHONPATH`。
+
+
+
 **Q2. `ModuleNotFoundError: No module named 'transformers'`**
 只装了 `requirements_api.txt`。补装：
 ```bash

@@ -7,6 +7,7 @@ semaphore serialises GPU access so tasks don't OOM each other.
 """
 import json
 import asyncio
+import os
 import threading
 import time
 import uuid
@@ -128,6 +129,16 @@ class TaskManager:
             log_path = config.LOG_DIR / f"{task.task_id}.log"
             cmd = self._build_cmd(script, checkpoint, task)
 
+            # The inference scripts live under api/scripts/ but import the
+            # repo-root package `longcat_video`. Python only puts the *script's*
+            # own directory on sys.path[0], so we must add REPO_ROOT to
+            # PYTHONPATH for the subprocess (and the torchrun workers it spawns).
+            env = os.environ.copy()
+            existing_pp = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = os.pathsep.join(
+                [str(config.REPO_ROOT)] + ([existing_pp] if existing_pp else [])
+            )
+
             try:
                 with open(log_path, "w", encoding="utf-8") as logf:
                     proc = await asyncio.create_subprocess_exec(
@@ -135,6 +146,7 @@ class TaskManager:
                         stdout=logf,
                         stderr=logf,
                         cwd=str(config.REPO_ROOT),
+                        env=env,
                     )
                     task.return_code = await proc.wait()
             except Exception as e:
