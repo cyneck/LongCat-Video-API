@@ -120,6 +120,24 @@ huggingface-cli download meituan-longcat/LongCat-Video-Avatar-1.5 \
   --local-dir ./weights/LongCat-Video-Avatar-1.5
 ```
 
+### 2.1 国内下载（HF 被墙/超时首选）
+
+直连 HuggingFace 在大陆服务器经常超时或断流，改用官方镜像 `hf-mirror.com`，**两条命令前加一行环境变量即可**：
+
+```bash
+pip install "huggingface_hub[cli]"
+
+export HF_ENDPOINT=https://hf-mirror.com
+
+hf-download() { huggingface-cli download "$1" --local-dir "$2"; }
+
+hf-download meituan-longcat/LongCat-Video        ./weights/LongCat-Video
+hf-download meituan-longcat/LongCat-Video-Avatar-1.5 ./weights/LongCat-Video-Avatar-1.5
+```
+
+> 镜像只加速「下载」环节，`HF_ENDPOINT` 仅影响 `huggingface-cli` 拉取地址；权重落盘后推理不再访问网络。
+> 若仍慢，可加 `--local-dir-use-symlinks False` 减少软链开销，或配合 `aria2` 多线程（见 `hf-mirror.com` 文档）。
+
 - 权重默认读取目录：`weights/LongCat-Video`（视频）与 `weights/LongCat-Video-Avatar-1.5`（数字人），可用环境变量 `LONGCAT_CHECKPOINT_DIR_VIDEO` / `LONGCAT_CHECKPOINT_DIR_AVATAR` 覆盖。
 - 若用旧版数字人 v1.0，把 `LONGCAT_CHECKPOINT_DIR_AVATAR` 指向 `weights/LongCat-Video-Avatar`，并在请求里设 `"model_type":"avatar-v1.0"`。
 
