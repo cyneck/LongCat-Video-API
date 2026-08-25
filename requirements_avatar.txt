@@ -13,7 +13,8 @@ nvidia-ml-py==13.580.65
 tzdata==2025.2
 onnx==1.18.0
 onnxruntime==1.17.0
-tritonserverclient==0.0.6
+# tritonserverclient 是 NVIDIA Triton 推理服务客户端，PyPI 无此包名/版本，
+# 且本仓库本地数字人生成不依赖 Triton 服务，故移除。
 openai==1.75.0
 numpy==1.26.4
 cffi==2.0.0
