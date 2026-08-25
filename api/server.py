@@ -56,17 +56,24 @@ app.add_middleware(
 
 @app.on_event("startup")
 def _startup_weight_check():
-    """Warn on boot (not crash) when weights are missing or mismatched, so ops
-    notices a broken layout before the first request hits a torchrun crash."""
+    """Warn on boot (not crash) when weights are broken, so ops notices a bad
+    layout before the first request hits a torchrun crash.
+
+    - Base video model is required by every task -> a missing dir IS warned.
+    - Avatar revisions are optional per deployment: only the *integrity* of
+      already-downloaded revisions is checked; a not-yet-downloaded revision is
+      skipped silently (the per-request preflight still fails fast with a
+      download hint when someone actually submits that model_type).
+    """
     import logging
     logger = logging.getLogger("longcat")
-    for mt in ("avatar-v1.0", "avatar-v1.5"):
-        ok, problems = config.check_weights(mt, "avatar_single")
-        if not ok:
-            logger.warning("LongCat 权重检查未通过 [%s]:\n%s", mt, "\n".join(problems))
     ok_v, pv = config.check_weights(None, None)
     if not ok_v:
         logger.warning("LongCat 基础视频模型检查未通过:\n%s", "\n".join(pv))
+    for mt in ("avatar-v1.0", "avatar-v1.5"):
+        ok, problems = config.check_weights(mt, "avatar_single", skip_missing_dirs=True)
+        if not ok:
+            logger.warning("LongCat 权重检查未通过 [%s]:\n%s", mt, "\n".join(problems))
 
 
 # --------------------------------------------------------------------------- #

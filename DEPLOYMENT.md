@@ -148,7 +148,7 @@ hf-download meituan-longcat/LongCat-Video-Avatar-1.5 ./weights/LongCat-Video-Ava
 > - 缺它会报 `OSError: Incorrect path_or_model_id: '.../LongCat-Video-Avatar-1.5/../LongCat-Video'`（或你自定义的 base 路径）。
 > 验证：`ls $LONGCAT_CHECKPOINT_DIR_VIDEO/tokenizer $LONGCAT_CHECKPOINT_DIR_VIDEO/text_encoder $LONGCAT_CHECKPOINT_DIR_VIDEO/vae $LONGCAT_CHECKPOINT_DIR_VIDEO/scheduler` 都应存在。
 
-> 🛡️ **权重就绪校验（fail-fast）**：服务启动时会打印各版本权重的就绪情况（缺失仅告警，不崩溃）；而每次提交数字人任务前，`/generate/avatar-single`、`/generate/avatar-multi` 会先调用 `config.check_weights(model_type, task_type)` 检查对应权重目录与必需子目录是否齐全。**缺失或版本错配会直接返回 HTTP 400 并给出下载命令**，而不是等到 torchrun 子进程崩了才暴露。这就把"下载了 v1.5 却在请求里写 v1.0"这类坑挡在了最前面。
+> 🛡️ **权重就绪校验（fail-fast）**：服务启动时，基础视频模型缺失会告警（所有任务都依赖它）；数字人 v1.0/v1.5 则**只检查「已下载版本」的目录完整性，未下载的版本静默跳过**（不报错、不告警）。而每次提交数字人任务前，`/generate/avatar-single`、`/generate/avatar-multi` 会先调用 `config.check_weights(model_type, task_type)` 检查对应权重目录与必需子目录是否齐全——**缺失或版本错配会直接返回 HTTP 400 并给出下载命令**，而不是等到 torchrun 子进程崩了才暴露。这就把"下载了 v1.5 却在请求里写 v1.0"这类坑挡在了最前面。
 
 ---
 

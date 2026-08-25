@@ -115,7 +115,7 @@ def _download_hint(repo: str, local_dir: str) -> str:
     )
 
 
-def check_weights(model_type: str = None, task_type: str = None):
+def check_weights(model_type: str = None, task_type: str = None, skip_missing_dirs: bool = False):
     """Validate that the required weights are present on disk.
 
     Returns ``(ok, problems)`` where ``problems`` is a list of human-readable
@@ -123,17 +123,24 @@ def check_weights(model_type: str = None, task_type: str = None):
     both for per-request preflight and for the startup readiness check so a
     misconfigured weight layout surfaces immediately instead of crashing deep
     inside a torchrun subprocess.
+
+    ``skip_missing_dirs=True`` silences "directory does not exist" problems and
+    only validates the *integrity* of directories that ARE present. The startup
+    check uses this for avatar revisions (a not-yet-downloaded revision is not
+    an error — the per-request preflight still fails fast with download hints),
+    while the request preflight keeps it False to surface every missing piece.
     """
     problems: list = []
 
     # 1) shared base video model
     base_dir = CHECKPOINT_DIR_VIDEO
     if not os.path.isdir(base_dir):
-        problems.append(
-            f"[基础视频模型] 目录不存在: {base_dir}\n"
-            f"  {_download_hint(HF_REPO_VIDEO, base_dir)}\n"
-            f"  或设置环境变量 LONGCAT_CHECKPOINT_DIR_VIDEO 指向已下载目录"
-        )
+        if not skip_missing_dirs:
+            problems.append(
+                f"[基础视频模型] 目录不存在: {base_dir}\n"
+                f"  {_download_hint(HF_REPO_VIDEO, base_dir)}\n"
+                f"  或设置环境变量 LONGCAT_CHECKPOINT_DIR_VIDEO 指向已下载目录"
+            )
     else:
         missing = [s for s in BASE_MODEL_SUBFOLDERS if not os.path.isdir(os.path.join(base_dir, s))]
         if missing:
@@ -144,12 +151,13 @@ def check_weights(model_type: str = None, task_type: str = None):
         mt = model_type or "avatar-v1.5"
         avatar_dir = avatar_checkpoint_dir(mt)
         if not os.path.isdir(avatar_dir):
-            repo = HF_REPO_AVATAR_V1 if mt == "avatar-v1.0" else HF_REPO_AVATAR_V15
-            problems.append(
-                f"[数字人 {mt}] 权重目录不存在: {avatar_dir}\n"
-                f"  {_download_hint(repo, avatar_dir)}\n"
-                f"  或设置 LONGCAT_CHECKPOINT_DIR_AVATAR_V1 / LONGCAT_CHECKPOINT_DIR_AVATAR_V15"
-            )
+            if not skip_missing_dirs:
+                repo = HF_REPO_AVATAR_V1 if mt == "avatar-v1.0" else HF_REPO_AVATAR_V15
+                problems.append(
+                    f"[数字人 {mt}] 权重目录不存在: {avatar_dir}\n"
+                    f"  {_download_hint(repo, avatar_dir)}\n"
+                    f"  或设置 LONGCAT_CHECKPOINT_DIR_AVATAR_V1 / LONGCAT_CHECKPOINT_DIR_AVATAR_V15"
+                )
         else:
             required = AVATAR_REQUIRED_SUBFOLDERS.get(mt, [])
             # only the dit subfolder matching this task is mandatory
