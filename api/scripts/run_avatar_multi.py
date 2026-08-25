@@ -176,11 +176,15 @@ def generate(args):
     cp_size = context_parallel_util.get_cp_size()
     cp_split_hw = context_parallel_util.get_optimal_split(cp_size)
 
-    tokenizer = AutoTokenizer.from_pretrained(os.path.join(checkpoint_dir, "..", "LongCat-Video"), subfolder="tokenizer", torch_dtype=torch.bfloat16)
-    text_encoder = UMT5EncoderModel.from_pretrained(os.path.join(checkpoint_dir, "..", "LongCat-Video"), subfolder="text_encoder", torch_dtype=torch.bfloat16)
-    vae = AutoencoderKLWan.from_pretrained(os.path.join(checkpoint_dir, "..", "LongCat-Video"), subfolder="vae", torch_dtype=torch.bfloat16)
+    # Base video model supplies the shared tokenizer/text_encoder/vae/scheduler.
+    # Default: sibling dir `LongCat-Video` next to the avatar checkpoint. Override with
+    # LONGCAT_CHECKPOINT_DIR_VIDEO to support arbitrary weights layouts.
+    base_model_dir = os.environ.get("LONGCAT_CHECKPOINT_DIR_VIDEO") or os.path.join(checkpoint_dir, "..", "LongCat-Video")
+    tokenizer = AutoTokenizer.from_pretrained(base_model_dir, subfolder="tokenizer", torch_dtype=torch.bfloat16)
+    text_encoder = UMT5EncoderModel.from_pretrained(base_model_dir, subfolder="text_encoder", torch_dtype=torch.bfloat16)
+    vae = AutoencoderKLWan.from_pretrained(base_model_dir, subfolder="vae", torch_dtype=torch.bfloat16)
     if model_type == "avatar-v1.0":
-        scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(os.path.join(checkpoint_dir, "..", "LongCat-Video"), subfolder="scheduler", torch_dtype=torch.bfloat16)
+        scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(base_model_dir, subfolder="scheduler", torch_dtype=torch.bfloat16)
     elif model_type == "avatar-v1.5":
         scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(checkpoint_dir, subfolder="scheduler", torch_dtype=torch.bfloat16)
     else:

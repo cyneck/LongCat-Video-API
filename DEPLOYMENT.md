@@ -123,8 +123,11 @@ huggingface-cli download meituan-longcat/LongCat-Video-Avatar-1.5 \
 - 权重默认读取目录：`weights/LongCat-Video`（视频）与 `weights/LongCat-Video-Avatar-1.5`（数字人），可用环境变量 `LONGCAT_CHECKPOINT_DIR_VIDEO` / `LONGCAT_CHECKPOINT_DIR_AVATAR` 覆盖。
 - 若用旧版数字人 v1.0，把 `LONGCAT_CHECKPOINT_DIR_AVATAR` 指向 `weights/LongCat-Video-Avatar`，并在请求里设 `"model_type":"avatar-v1.0"`。
 
-> ⚠️ **数字人强依赖基础视频模型（关键坑）**：`api/scripts/run_avatar_*.py` 里 tokenizer / text_encoder / vae / scheduler 是**写死**从 `os.path.join(checkpoint_dir, "..", "LongCat-Video")` 读取的，即必须是 avatar 目录的**兄弟目录** `weights/LongCat-Video`。哪怕你把 `LONGCAT_CHECKPOINT_DIR_VIDEO` 指到别处也没用——脚本不读这个变量。所以**两个权重都必须下载，且基础模型必须位于 `weights/LongCat-Video`**（与 `weights/LongCat-Video-Avatar-1.5` 同级）。缺它会报 `OSError: Incorrect path_or_model_id: '.../LongCat-Video-Avatar-1.5/../LongCat-Video'`。
-> 验证：`ls weights/LongCat-Video/tokenizer weights/LongCat-Video/text_encoder weights/LongCat-Video/vae weights/LongCat-Video/scheduler` 都应存在。
+> ⚠️ **数字人强依赖基础视频模型**：`api/scripts/run_avatar_*.py` 里 tokenizer / text_encoder / vae / scheduler 来自**基础视频模型**。代码优先读环境变量 `LONGCAT_CHECKPOINT_DIR_VIDEO`，未设置时回退到 avatar 目录的**兄弟目录** `weights/LongCat-Video`（`checkpoint_dir/../LongCat-Video`）。
+> - 默认布局：两个权重都下载到 `weights/` 下且同级（avatar 自动找到兄弟 `LongCat-Video`），即可直接跑。
+> - 若基础模型放在别处，设 `LONGCAT_CHECKPOINT_DIR_VIDEO=/path/to/LongCat-Video` 即可，**不再要求必须是兄弟目录**。
+> - 缺它会报 `OSError: Incorrect path_or_model_id: '.../LongCat-Video-Avatar-1.5/../LongCat-Video'`（或你自定义的 base 路径）。
+> 验证：`ls $LONGCAT_CHECKPOINT_DIR_VIDEO/tokenizer $LONGCAT_CHECKPOINT_DIR_VIDEO/text_encoder $LONGCAT_CHECKPOINT_DIR_VIDEO/vae $LONGCAT_CHECKPOINT_DIR_VIDEO/scheduler` 都应存在。
 
 ---
 
@@ -144,7 +147,7 @@ huggingface-cli download meituan-longcat/LongCat-Video-Avatar-1.5 \
 | `LONGCAT_NUM_GPUS` | `1` | 按可用卡数 | 每个任务的 GPU 数（=torchrun `nproc_per_node`） |
 | `LONGCAT_GPU_CONCURRENCY` | `1` | 默认串行 | 同时跑几个任务，多任务需分配不同 `master_port` |
 | `LONGCAT_WORK_DIR` | `./api_work` | 保持默认 | 上传 / 输出 / 日志根目录（已建议加入 `.gitignore`） |
-| `LONGCAT_CHECKPOINT_DIR_VIDEO` | `weights/LongCat-Video` | 按实际改 | 视频权重目录 |
+| `LONGCAT_CHECKPOINT_DIR_VIDEO` | `weights/LongCat-Video` | 按实际改 | 视频权重目录；**数字人脚本也从此读取共享的 tokenizer/text_encoder/vae/scheduler**（未设则回退到 avatar 目录的兄弟 `LongCat-Video`） |
 | `LONGCAT_CHECKPOINT_DIR_AVATAR` | `weights/LongCat-Video-Avatar-1.5` | 按实际改 | 数字人权重目录 |
 
 > H5 页面用的是**相对地址**（`fetch("/health")`、上传 `/files/*`），所以改端口 / 反代域名对前端完全透明，无需改代码。
