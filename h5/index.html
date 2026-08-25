@@ -588,6 +588,12 @@ async function createTask(type, body, resSel) {
 }
 
 function renderResult(box, taskId, status, data) {
+  // 轮询会每 2.5s 重建本卡片 DOM，重建前先保存「日志是否展开 + 内容」，
+  // 重建后恢复，避免用户展开的日志被重绘导致“自动收起”。
+  const prevLog = box.querySelector("#log-" + taskId);
+  const logWasShown = prevLog && prevLog.classList.contains("show");
+  const logText = logWasShown ? prevLog.textContent : "";
+
   const label = { pending: "排队中", running: "生成中", done: "已完成", failed: "失败" }[status] || status;
   let html = `<div class="task-card">
     <div class="task-head">
@@ -612,6 +618,11 @@ function renderResult(box, taskId, status, data) {
   }
   html += `</div>`;
   box.innerHTML = html;
+  if (logWasShown) {
+    const logEl = box.querySelector("#log-" + taskId);
+    logEl.textContent = logText;
+    logEl.classList.add("show");
+  }
   box.querySelector(".loglink").addEventListener("click", () => toggleLog(taskId));
 }
 
