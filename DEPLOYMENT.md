@@ -138,14 +138,17 @@ hf-download meituan-longcat/LongCat-Video-Avatar-1.5 ./weights/LongCat-Video-Ava
 > 镜像只加速「下载」环节，`HF_ENDPOINT` 仅影响 `huggingface-cli` 拉取地址；权重落盘后推理不再访问网络。
 > 若仍慢，可加 `--local-dir-use-symlinks False` 减少软链开销，或配合 `aria2` 多线程（见 `hf-mirror.com` 文档）。
 
-- 权重默认读取目录：`weights/LongCat-Video`（视频）与 `weights/LongCat-Video-Avatar-1.5`（数字人），可用环境变量 `LONGCAT_CHECKPOINT_DIR_VIDEO` / `LONGCAT_CHECKPOINT_DIR_AVATAR` 覆盖。
-- 若用旧版数字人 v1.0，把 `LONGCAT_CHECKPOINT_DIR_AVATAR` 指向 `weights/LongCat-Video-Avatar`，并在请求里设 `"model_type":"avatar-v1.0"`。
+- 权重默认读取目录：`weights/LongCat-Video`（视频）、`weights/LongCat-Video-Avatar`（数字人 v1.0）、`weights/LongCat-Video-Avatar-1.5`（数字人 v1.5）。可用环境变量 `LONGCAT_CHECKPOINT_DIR_VIDEO` / `LONGCAT_CHECKPOINT_DIR_AVATAR_V1` / `LONGCAT_CHECKPOINT_DIR_AVATAR_V15` 覆盖（旧变量 `LONGCAT_CHECKPOINT_DIR_AVATAR` 仍可用，设了会同时覆盖两个版本）。
+- **v1.0 与 v1.5 是两套独立权重，目录布局不同，不能混用**：v1.0 在 `LongCat-Video-Avatar`（子目录 `avatar_single`/`avatar_multi` + `chinese-wav2vec2-base`），v1.5 在 `LongCat-Video-Avatar-1.5`（子目录 `base_model` + `whisper-large-v3`）。服务会按请求里的 `"model_type"` 自动选对应目录——`avatar-v1.0` 读 v1.0 目录，`avatar-v1.5` 读 v1.5 目录。
+- 若只用旧版数字人 v1.0，把 `LONGCAT_CHECKPOINT_DIR_AVATAR_V1` 指向 `weights/LongCat-Video-Avatar`，并在请求里设 `"model_type":"avatar-v1.0"`。
 
-> ⚠️ **数字人强依赖基础视频模型**：`api/scripts/run_avatar_*.py` 里 tokenizer / text_encoder / vae / scheduler 来自**基础视频模型**。代码优先读环境变量 `LONGCAT_CHECKPOINT_DIR_VIDEO`，未设置时回退到 avatar 目录的**兄弟目录** `weights/LongCat-Video`（`checkpoint_dir/../LongCat-Video`）。
-> - 默认布局：两个权重都下载到 `weights/` 下且同级（avatar 自动找到兄弟 `LongCat-Video`），即可直接跑。
-> - 若基础模型放在别处，设 `LONGCAT_CHECKPOINT_DIR_VIDEO=/path/to/LongCat-Video` 即可，**不再要求必须是兄弟目录**。
+> ⚠️ **数字人强依赖基础视频模型**：`api/scripts/run_avatar_*.py` 里 tokenizer / text_encoder / vae / scheduler 来自**基础视频模型**。代码优先读环境变量 `LONGCAT_CHECKPOINT_DIR_VIDEO`，未设置时回退到 avatar 目录的**兄弟目录** `weights/LongCat-Video`（`checkpoint_dir/../LongCat-Video`，已用 `os.path.normpath` 归一化，避免中间目录缺失导致路径解析失败）。
+> - 默认布局：权重都下载到 `weights/` 下且同级（avatar 自动找到兄弟 `LongCat-Video`），即可直接跑。
+> - 若基础模型放在别处，设 `LONGCAT_CHECKPOINT_DIR_VIDEO=/path/to/LongCat-Video` 即可，**不再要求必须是兄弟目录**（服务启动时会把该变量显式注入子进程，回退路径基本不会触发）。
 > - 缺它会报 `OSError: Incorrect path_or_model_id: '.../LongCat-Video-Avatar-1.5/../LongCat-Video'`（或你自定义的 base 路径）。
 > 验证：`ls $LONGCAT_CHECKPOINT_DIR_VIDEO/tokenizer $LONGCAT_CHECKPOINT_DIR_VIDEO/text_encoder $LONGCAT_CHECKPOINT_DIR_VIDEO/vae $LONGCAT_CHECKPOINT_DIR_VIDEO/scheduler` 都应存在。
+
+> 🛡️ **权重就绪校验（fail-fast）**：服务启动时会打印各版本权重的就绪情况（缺失仅告警，不崩溃）；而每次提交数字人任务前，`/generate/avatar-single`、`/generate/avatar-multi` 会先调用 `config.check_weights(model_type, task_type)` 检查对应权重目录与必需子目录是否齐全。**缺失或版本错配会直接返回 HTTP 400 并给出下载命令**，而不是等到 torchrun 子进程崩了才暴露。这就把"下载了 v1.5 却在请求里写 v1.0"这类坑挡在了最前面。
 
 ---
 
@@ -165,8 +168,10 @@ hf-download meituan-longcat/LongCat-Video-Avatar-1.5 ./weights/LongCat-Video-Ava
 | `LONGCAT_NUM_GPUS` | `1` | 按可用卡数 | 每个任务的 GPU 数（=torchrun `nproc_per_node`） |
 | `LONGCAT_GPU_CONCURRENCY` | `1` | 默认串行 | 同时跑几个任务，多任务需分配不同 `master_port` |
 | `LONGCAT_WORK_DIR` | `./api_work` | 保持默认 | 上传 / 输出 / 日志根目录（已建议加入 `.gitignore`） |
-| `LONGCAT_CHECKPOINT_DIR_VIDEO` | `weights/LongCat-Video` | 按实际改 | 视频权重目录；**数字人脚本也从此读取共享的 tokenizer/text_encoder/vae/scheduler**（未设则回退到 avatar 目录的兄弟 `LongCat-Video`） |
-| `LONGCAT_CHECKPOINT_DIR_AVATAR` | `weights/LongCat-Video-Avatar-1.5` | 按实际改 | 数字人权重目录 |
+| `LONGCAT_CHECKPOINT_DIR_VIDEO` | `weights/LongCat-Video` | 按实际改 | 视频权重目录；**数字人脚本也从此读取共享的 tokenizer/text_encoder/vae/scheduler**（未设则回退到 avatar 目录的兄弟 `LongCat-Video`，且已由服务注入子进程） |
+| `LONGCAT_CHECKPOINT_DIR_AVATAR_V1` | `weights/LongCat-Video-Avatar` | 按实际改 | 数字人 **v1.0** 权重目录；请求 `model_type:"avatar-v1.0"` 时自动选用 |
+| `LONGCAT_CHECKPOINT_DIR_AVATAR_V15` | `weights/LongCat-Video-Avatar-1.5` | 按实际改 | 数字人 **v1.5** 权重目录（默认）；请求 `model_type:"avatar-v1.5"` 时自动选用 |
+| `LONGCAT_CHECKPOINT_DIR_AVATAR` | _(未设置)_ | 一般不需要 | 旧版总开关：一旦设置会**同时覆盖 v1.0 与 v1.5**（保持向后兼容），优先级高于上面两个分版本变量 |
 
 > H5 页面用的是**相对地址**（`fetch("/health")`、上传 `/files/*`），所以改端口 / 反代域名对前端完全透明，无需改代码。
 

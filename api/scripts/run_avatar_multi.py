@@ -179,7 +179,11 @@ def generate(args):
     # Base video model supplies the shared tokenizer/text_encoder/vae/scheduler.
     # Default: sibling dir `LongCat-Video` next to the avatar checkpoint. Override with
     # LONGCAT_CHECKPOINT_DIR_VIDEO to support arbitrary weights layouts.
-    base_model_dir = os.environ.get("LONGCAT_CHECKPOINT_DIR_VIDEO") or os.path.join(checkpoint_dir, "..", "LongCat-Video")
+    # normpath collapses the `..` so the path resolves even when the intermediate
+    # avatar directory is absent (otherwise os.path.isdir trips on the missing
+    # component and HuggingFace reports "Incorrect path_or_model_id").
+    _fallback = os.path.normpath(os.path.join(checkpoint_dir, "..", "LongCat-Video"))
+    base_model_dir = os.environ.get("LONGCAT_CHECKPOINT_DIR_VIDEO") or _fallback
     tokenizer = AutoTokenizer.from_pretrained(base_model_dir, subfolder="tokenizer", torch_dtype=torch.bfloat16)
     text_encoder = UMT5EncoderModel.from_pretrained(base_model_dir, subfolder="text_encoder", torch_dtype=torch.bfloat16)
     vae = AutoencoderKLWan.from_pretrained(base_model_dir, subfolder="vae", torch_dtype=torch.bfloat16)

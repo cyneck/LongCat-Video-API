@@ -17,10 +17,48 @@ CHECKPOINT_DIR_VIDEO = os.environ.get(
     "LONGCAT_CHECKPOINT_DIR_VIDEO",
     str(REPO_ROOT / "weights" / "LongCat-Video"),
 )
+
+# Avatar (digital-human) weights ship as two independent revisions with
+# *different* directory layouts:
+#   - v1.0  -> LongCat-Video-Avatar      (avatar_single/avatar_multi + chinese-wav2vec2-base)
+#   - v1.5  -> LongCat-Video-Avatar-1.5  (base_model + whisper-large-v3)
+# They must NOT be mixed: requesting avatar-v1.0 against the v1.5 directory (or
+# vice-versa) fails at model load. We therefore resolve the checkpoint dir from
+# the requested model_type instead of a single shared path. Defaults only —
+# actual resolution happens in avatar_checkpoint_dir(), which re-reads the
+# environment on every call so overrides always take effect.
+DEFAULT_CHECKPOINT_DIR_AVATAR_V1 = str(REPO_ROOT / "weights" / "LongCat-Video-Avatar")
+DEFAULT_CHECKPOINT_DIR_AVATAR_V15 = str(REPO_ROOT / "weights" / "LongCat-Video-Avatar-1.5")
+
+# Kept for backward compatibility: legacy single-override deployments that set
+# only LONGCAT_CHECKPOINT_DIR_AVATAR keep working (see avatar_checkpoint_dir).
 CHECKPOINT_DIR_AVATAR = os.environ.get(
     "LONGCAT_CHECKPOINT_DIR_AVATAR",
-    str(REPO_ROOT / "weights" / "LongCat-Video-Avatar-1.5"),
+    DEFAULT_CHECKPOINT_DIR_AVATAR_V15,
 )
+
+
+def avatar_checkpoint_dir(model_type: str) -> str:
+    """Resolve the avatar checkpoint directory for a given model_type.
+
+    Reads LONGCAT_CHECKPOINT_DIR_AVATAR (legacy, overrides both revisions)
+    then LONGCAT_CHECKPOINT_DIR_AVATAR_V1 / _V15 (per-revision) at call time,
+    falling back to the default weights/ layout.
+    """
+    override = os.environ.get("LONGCAT_CHECKPOINT_DIR_AVATAR")
+    if override:
+        return override
+    if model_type == "avatar-v1.0":
+        return os.environ.get("LONGCAT_CHECKPOINT_DIR_AVATAR_V1") or DEFAULT_CHECKPOINT_DIR_AVATAR_V1
+    # default / avatar-v1.5
+    return os.environ.get("LONGCAT_CHECKPOINT_DIR_AVATAR_V15") or DEFAULT_CHECKPOINT_DIR_AVATAR_V15
+
+
+def checkpoint_for_task(task_type: str, model_type: str = None) -> str:
+    """Pick the right weights dir for a task, version-aware for avatar tasks."""
+    if task_type in ("avatar_single", "avatar_multi"):
+        return avatar_checkpoint_dir(model_type or "avatar-v1.5")
+    return CHECKPOINT_DIR_VIDEO
 
 # --- distributed / runtime ---
 NUM_GPUS = int(os.environ.get("LONGCAT_NUM_GPUS", "1"))            # number of GPUs per task
@@ -53,6 +91,78 @@ def ensure_dirs():
         d.mkdir(parents=True, exist_ok=True)
 
 
+# --- weight readiness checks (fail fast with a friendly message) ---
+# Shared base model supplies tokenizer / text_encoder / vae / scheduler for every
+# task. Avatar revisions additionally need revision-specific subfolders.
+BASE_MODEL_SUBFOLDERS = ["tokenizer", "text_encoder", "vae", "scheduler"]
+
+AVATAR_REQUIRED_SUBFOLDERS = {
+    "avatar-v1.0": ["avatar_single", "avatar_multi", "chinese-wav2vec2-base", "vocal_separator"],
+    "avatar-v1.5": ["base_model", "whisper-large-v3", "vocal_separator", "scheduler"],
+}
+
+# HuggingFace repo ids, used only to build the download hint in error messages.
+HF_REPO_VIDEO = "meituan-longcat/LongCat-Video"
+HF_REPO_AVATAR_V1 = "meituan-longcat/LongCat-Video-Avatar"
+HF_REPO_AVATAR_V15 = "meituan-longcat/LongCat-Video-Avatar-1.5"
+
+
+def _download_hint(repo: str, local_dir: str) -> str:
+    return (
+        f"  下载: huggingface-cli download {repo} --local-dir {local_dir} "
+        f"--local-dir-use-symlinks False\n"
+        f"  (大陆服务器加: export HF_ENDPOINT=https://hf-mirror.com)"
+    )
+
+
+def check_weights(model_type: str = None, task_type: str = None):
+    """Validate that the required weights are present on disk.
+
+    Returns ``(ok, problems)`` where ``problems`` is a list of human-readable
+    strings describing exactly what is missing and how to fix it. This is used
+    both for per-request preflight and for the startup readiness check so a
+    misconfigured weight layout surfaces immediately instead of crashing deep
+    inside a torchrun subprocess.
+    """
+    problems: list = []
+
+    # 1) shared base video model
+    base_dir = CHECKPOINT_DIR_VIDEO
+    if not os.path.isdir(base_dir):
+        problems.append(
+            f"[基础视频模型] 目录不存在: {base_dir}\n"
+            f"  {_download_hint(HF_REPO_VIDEO, base_dir)}\n"
+            f"  或设置环境变量 LONGCAT_CHECKPOINT_DIR_VIDEO 指向已下载目录"
+        )
+    else:
+        missing = [s for s in BASE_MODEL_SUBFOLDERS if not os.path.isdir(os.path.join(base_dir, s))]
+        if missing:
+            problems.append(f"[基础视频模型] {base_dir} 缺少子目录: {missing}")
+
+    # 2) avatar-specific revision
+    if task_type in ("avatar_single", "avatar_multi"):
+        mt = model_type or "avatar-v1.5"
+        avatar_dir = avatar_checkpoint_dir(mt)
+        if not os.path.isdir(avatar_dir):
+            repo = HF_REPO_AVATAR_V1 if mt == "avatar-v1.0" else HF_REPO_AVATAR_V15
+            problems.append(
+                f"[数字人 {mt}] 权重目录不存在: {avatar_dir}\n"
+                f"  {_download_hint(repo, avatar_dir)}\n"
+                f"  或设置 LONGCAT_CHECKPOINT_DIR_AVATAR_V1 / LONGCAT_CHECKPOINT_DIR_AVATAR_V15"
+            )
+        else:
+            required = AVATAR_REQUIRED_SUBFOLDERS.get(mt, [])
+            # only the dit subfolder matching this task is mandatory
+            if mt == "avatar-v1.0":
+                dit = "avatar_single" if task_type == "avatar_single" else "avatar_multi"
+                required = [s for s in required if s in ("chinese-wav2vec2-base", "vocal_separator", dit)]
+            missing = [s for s in required if not os.path.isdir(os.path.join(avatar_dir, s))]
+            if missing:
+                problems.append(f"[数字人 {mt}] {avatar_dir} 缺少子目录: {missing}")
+
+    return (len(problems) == 0, problems)
+
+
 # --- script dispatch table ---
 SCRIPTS = {
     "text_to_video": SCRIPTS_DIR / "run_text_to_video.py",
@@ -60,15 +170,6 @@ SCRIPTS = {
     "video_continuation": SCRIPTS_DIR / "run_video_continuation.py",
     "avatar_single": SCRIPTS_DIR / "run_avatar_single.py",
     "avatar_multi": SCRIPTS_DIR / "run_avatar_multi.py",
-}
-
-# checkpoint used by each task type
-TASK_CHECKPOINT = {
-    "text_to_video": CHECKPOINT_DIR_VIDEO,
-    "image_to_video": CHECKPOINT_DIR_VIDEO,
-    "video_continuation": CHECKPOINT_DIR_VIDEO,
-    "avatar_single": CHECKPOINT_DIR_AVATAR,
-    "avatar_multi": CHECKPOINT_DIR_AVATAR,
 }
 
 # --- optional: H5 embedding + simple login gate ---

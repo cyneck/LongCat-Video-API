@@ -45,6 +45,21 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+def _startup_weight_check():
+    """Warn on boot (not crash) when weights are missing or mismatched, so ops
+    notices a broken layout before the first request hits a torchrun crash."""
+    import logging
+    logger = logging.getLogger("longcat")
+    for mt in ("avatar-v1.0", "avatar-v1.5"):
+        ok, problems = config.check_weights(mt, "avatar_single")
+        if not ok:
+            logger.warning("LongCat 权重检查未通过 [%s]:\n%s", mt, "\n".join(problems))
+    ok_v, pv = config.check_weights(None, None)
+    if not ok_v:
+        logger.warning("LongCat 基础视频模型检查未通过:\n%s", "\n".join(pv))
+
+
 # --------------------------------------------------------------------------- #
 # optional: simple login gate + H5 embedding
 # --------------------------------------------------------------------------- #
@@ -219,6 +234,13 @@ async def gen_avatar_single(req: schemas.AvatarSingleRequest):
         req.cond_image = _resolve_upload_path(req.cond_image)
     if req.stage_1 == "ai2v" and not req.cond_image:
         raise HTTPException(status_code=400, detail="cond_image is required when stage_1='ai2v'")
+    # fail fast: surface a missing/mismatched weight layout before queuing
+    ok, problems = config.check_weights(req.model_type, "avatar_single")
+    if not ok:
+        raise HTTPException(
+            status_code=400,
+            detail="数字人权重未就绪，无法执行:\n" + "\n".join(problems),
+        )
     return _enqueue("avatar_single", req.model_dump())
 
 
@@ -228,6 +250,13 @@ async def gen_avatar_multi(req: schemas.AvatarMultiRequest):
     req.cond_audio = {k: _resolve_upload_path(v) for k, v in req.cond_audio.items()}
     if not any(req.cond_audio.values()):
         raise HTTPException(status_code=400, detail="at least one of person1/person2 audio is required")
+    # fail fast: surface a missing/mismatched weight layout before queuing
+    ok, problems = config.check_weights(req.model_type, "avatar_multi")
+    if not ok:
+        raise HTTPException(
+            status_code=400,
+            detail="数字人权重未就绪，无法执行:\n" + "\n".join(problems),
+        )
     return _enqueue("avatar_multi", req.model_dump())
 
 

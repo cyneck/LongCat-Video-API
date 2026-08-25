@@ -118,13 +118,25 @@ class TaskManager:
             self._persist()
 
             script = config.SCRIPTS.get(task.task_type)
-            checkpoint = config.TASK_CHECKPOINT.get(task.task_type)
-            if not script or not checkpoint:
+            if not script:
                 task.status = TaskStatus.FAILED
                 task.error = f"Unknown task type: {task.task_type}"
                 task.finished_at = time.time()
                 self._persist()
                 return
+
+            # Resolve the checkpoint dir in a version-aware way for avatar tasks:
+            # avatar-v1.0 reads from LongCat-Video-Avatar, avatar-v1.5 from
+            # LongCat-Video-Avatar-1.5. The model_type lives inside the request
+            # json that we already wrote to disk.
+            model_type = None
+            if task.task_type in ("avatar_single", "avatar_multi"):
+                try:
+                    data = json.loads(Path(task.input_path).read_text(encoding="utf-8"))
+                    model_type = data.get("model_type")
+                except Exception:
+                    model_type = None
+            checkpoint = config.checkpoint_for_task(task.task_type, model_type)
 
             log_path = config.LOG_DIR / f"{task.task_id}.log"
             cmd = self._build_cmd(script, checkpoint, task)
@@ -138,6 +150,13 @@ class TaskManager:
             env["PYTHONPATH"] = os.pathsep.join(
                 [str(config.REPO_ROOT)] + ([existing_pp] if existing_pp else [])
             )
+            # Always hand the shared base model dir to the subprocess explicitly
+            # so avatar scripts never fall back to the fragile
+            # `checkpoint_dir/../LongCat-Video` path (which fails to resolve when
+            # the intermediate avatar directory is missing). config already reads
+            # LONGCAT_CHECKPOINT_DIR_VIDEO from the environment, so this is a no-op
+            # when the operator set it and a safety net otherwise.
+            env["LONGCAT_CHECKPOINT_DIR_VIDEO"] = config.CHECKPOINT_DIR_VIDEO
 
             try:
                 with open(log_path, "w", encoding="utf-8") as logf:
