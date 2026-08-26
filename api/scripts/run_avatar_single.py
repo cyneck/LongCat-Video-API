@@ -240,7 +240,7 @@ def generate(args):
                 num_segments = 1
             else:
                 num_segments = 1 + math.ceil((source_duration - first_seg_dur) / seg_advance)
-            _max_seg = config.A100_40G.get("max_num_segments", 0)
+            _max_seg = config.LOW_VRAM.get("max_num_segments", 0)
             if _max_seg and _max_seg > 0 and num_segments > _max_seg:
                 print(f"[longcat][auto] num_segments={num_segments} 超过 profile 上限，封顶为 {_max_seg}", flush=True)
                 num_segments = _max_seg

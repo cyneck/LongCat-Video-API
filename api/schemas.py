@@ -5,7 +5,7 @@ the /files/upload endpoints — we keep heavy binary data out of the JSON body
 and avoid re-uploading on retries.
 
 The default avatar-v1.5 runtime profile targets one A100 40GB GPU. While
-LONGCAT_A100_40G_PROFILE=1 (the default), v1.5 requests are clamped to SAFE
+LONGCAT_A100_40G_PROFILE / config.toml a100_40g_enabled (unset ⇒ 按真实显存自动判定：≤50GB 才启用), v1.5 requests are clamped to SAFE
 CEILINGS (max resolution / max segments, and forced INT8 + 8-step distill for
 memory safety) so a 40GB card does not OOM. Caller-supplied values BELOW the
 ceiling, and the guidance scales, are always honoured — this profile only ever
@@ -32,8 +32,8 @@ _RES_PX = {
 
 
 def _a100_40g_profile_enabled() -> bool:
-    # value is resolved in config.py (config.toml > LONGCAT_A100_40G_PROFILE > default 1)
-    return config.A100_40G_PROFILE_ENABLED
+    # value is resolved in config.py (config.toml / env > 真实显存自动探测；不再默认开启)
+    return config.LOW_VRAM_PROFILE_ENABLED
 
 
 class TextToVideoRequest(BaseModel):
@@ -76,7 +76,7 @@ class VideoContinuationRequest(BaseModel):
 class _Avatar40GDefaults(BaseModel):
     """Safe-ceiling normalization for the single-A100 production profile.
 
-    Values come from config.A100_40G (config.toml [profile], overridable by the
+    Values come from config.LOW_VRAM (config.toml [profile], overridable by the
     LONGCAT_A100_40G_* env vars). Nothing here is hard-coded in this file.
     """
 
@@ -84,7 +84,7 @@ class _Avatar40GDefaults(BaseModel):
     def apply_a100_40g_profile(self):
         if not _a100_40g_profile_enabled() or self.model_type != "avatar-v1.5":
             return self
-        p = config.A100_40G
+        p = config.LOW_VRAM
         changed = []
 
         # --- memory-safety: required on a 40G card, cannot be opted out ---
@@ -126,8 +126,8 @@ class AvatarSingleRequest(_Avatar40GDefaults):
     resolution: str = "480p"
     num_segments: Union[int, str] = Field("auto", description="视频段数：整数或 'auto'（按音频时长自动计算）")
     num_inference_steps: int = Field(8, ge=1, le=100)
-    text_guidance_scale: float = config.A100_40G["text_guidance_scale"]
-    audio_guidance_scale: float = config.A100_40G["audio_guidance_scale"]
+    text_guidance_scale: float = config.LOW_VRAM["text_guidance_scale"]
+    audio_guidance_scale: float = config.LOW_VRAM["audio_guidance_scale"]
     ref_img_index: int = 10
     mask_frame_range: int = 3
     model_type: str = Field("avatar-v1.5", pattern="^(avatar-v1.0|avatar-v1.5)$")
@@ -147,8 +147,8 @@ class AvatarMultiRequest(_Avatar40GDefaults):
     resolution: str = "480p"
     num_segments: Union[int, str] = Field("auto", description="视频段数：整数或 'auto'（按音频时长自动计算）")
     num_inference_steps: int = Field(8, ge=1, le=100)
-    text_guidance_scale: float = config.A100_40G["text_guidance_scale"]
-    audio_guidance_scale: float = config.A100_40G["audio_guidance_scale"]
+    text_guidance_scale: float = config.LOW_VRAM["text_guidance_scale"]
+    audio_guidance_scale: float = config.LOW_VRAM["audio_guidance_scale"]
     ref_img_index: int = 10
     mask_frame_range: int = 3
     model_type: str = Field("avatar-v1.5", pattern="^(avatar-v1.0|avatar-v1.5)$")

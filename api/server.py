@@ -103,9 +103,9 @@ def _service_info():
         "auth": config.AUTH_ENABLED,
         # 把 A100-40G 安全档的「强制开关」暴露给前端，H5 据此把被强制开启的
         # INT8 / distill 勾选框置灰并提示「服务器强制」，避免用户以为能关掉。
-        "a100_40g_profile": config.A100_40G_PROFILE_ENABLED,
-        "force_use_int8": config.A100_40G.get("force_use_int8", False),
-        "force_use_distill": config.A100_40G.get("force_use_distill", False),
+        "a100_40g_profile": config.LOW_VRAM_PROFILE_ENABLED,
+        "force_use_int8": config.LOW_VRAM.get("force_use_int8", False),
+        "force_use_distill": config.LOW_VRAM.get("force_use_distill", False),
         "endpoints": [
             "/files/image", "/files/video", "/files/audio", "/files/json",
             "/generate/text-to-video", "/generate/image-to-video",

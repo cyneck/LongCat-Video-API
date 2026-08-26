@@ -195,15 +195,63 @@ def validate_auth():
 
 
 # ---------------------------------------------------------------------------
-# A100-40G runtime profile — values come from config.toml, NOT hard-coded here.
-#   The API normalises avatar-v1.5 requests to these SAFE CEILINGS (clamp down
-#   only) so a 40GB card does not OOM, while still honouring caller intent where
-#   it is memory-safe. See api/schemas.py::apply_a100_40g_profile.
+# low-VRAM 安全档（内部曾叫 A100-40G；现按真实显存自动判定，不再硬编码“40G 假设”）
+#   * 改进点：之前该档“默认开启 + 数值从代码挪到 config.toml”，但仍等于假设
+#     “所有部署都是 40G 卡”，与“不要硬编码硬件假设”相悖——任何部署都会强制 INT8+蒸馏
+#     并打印“请求已被 profile 调整”日志。现改为：
+#        - 显式 env / config.toml 优先（运维可按真实硬件明确开启或关闭）；
+#        - 未显式设置时，启动时探测真实最小 GPU 显存：≤ LOW_VRAM_THRESHOLD_GB 才启用
+#          安全档；> 阈值（如 A100-80G / H100）不强制 INT8/蒸馏，尊重调用方创意意图，
+#          也不会打印那条日志。
+#   * 安全档只做“向下钳制”（分辨率/段数封顶、强制 INT8+蒸馏防 OOM），从不改写创意参数。
+#     详见 api/schemas.py::apply_a100_40g_profile。
+#   * 注：env / config.toml key 仍沿用 `a100_40g_*`（LONGCAT_A100_40G_*）以兼容既有部署。
 # ---------------------------------------------------------------------------
-A100_40G_PROFILE_ENABLED = _as_bool(
-    _env_or_cfg("profile", "a100_40g_enabled", "LONGCAT_A100_40G_PROFILE", "1")
-)
-A100_40G = {
+LOW_VRAM_THRESHOLD_GB = 50.0
+LOW_VRAM_PROFILE_SOURCE = "default"
+
+
+def _detect_low_vram(threshold_gb: float = LOW_VRAM_THRESHOLD_GB) -> bool:
+    """按真实 GPU 显存判定是否低显存——绝不做“当前是 40G 就假设所有都是 40G”的硬编码。
+
+    返回 True 表示需要启用内存安全档（强制 INT8 + 蒸馏等）。探测失败（无 CUDA /
+    torch 不可导入）时保守返回 False 并打印提示，由运维显式设置 env/config 接管。
+    """
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return False
+        min_gb = min(
+            torch.cuda.get_device_properties(i).total_memory / (1024 ** 3)
+            for i in range(torch.cuda.device_count())
+        )
+        return min_gb <= threshold_gb
+    except Exception as _e:  # noqa: BLE001
+        print(
+            f"[longcat][config] GPU 显存探测失败({_e})，低显存安全档默认关闭；"
+            f"若确为低显存部署请显式设置 LONGCAT_A100_40G_PROFILE=1",
+            flush=True,
+        )
+        return False
+
+
+def _resolve_low_vram_profile_enabled() -> bool:
+    """解析安全档开关：env > config.toml > 自动探测真实显存（不再默认开启）。"""
+    global LOW_VRAM_PROFILE_SOURCE
+    env_val = os.environ.get("LONGCAT_A100_40G_PROFILE", "").strip()
+    if env_val != "":
+        LOW_VRAM_PROFILE_SOURCE = "env(LONGCAT_A100_40G_PROFILE)"
+        return _as_bool(env_val)
+    cfg_val = _section("profile").get("a100_40g_enabled", None)
+    if cfg_val is not None and str(cfg_val).strip() != "":
+        LOW_VRAM_PROFILE_SOURCE = "config.toml[profile].a100_40g_enabled"
+        return _as_bool(cfg_val)
+    LOW_VRAM_PROFILE_SOURCE = f"auto-detect(显存≤{LOW_VRAM_THRESHOLD_GB:.0f}GB)"
+    return _detect_low_vram()
+
+
+LOW_VRAM_PROFILE_ENABLED = _resolve_low_vram_profile_enabled()
+LOW_VRAM = {
     "max_resolution": _env_or_cfg("profile", "max_resolution", "LONGCAT_A100_40G_MAX_RESOLUTION", "480p"),
     # max_num_segments: 0 = 不限制。段数走滑动窗口串行（每段独立前向、用完即释放显存/内存），
     # 不额外占用显存，仅影响总生成耗时；生产若担心超长音频任务耗时爆炸，可设为上限值。
@@ -223,6 +271,12 @@ A100_40G = {
     ),
 }
 
+print(
+    f"[longcat][config] 低显存安全档(legacy: A100-40G): "
+    f"{'启用' if LOW_VRAM_PROFILE_ENABLED else '关闭'}（来源={LOW_VRAM_PROFILE_SOURCE}）",
+    flush=True,
+)
+
 
 # ---------------------------------------------------------------------------
 # propagate config.toml values into the environment so torchrun subprocesses
@@ -240,7 +294,7 @@ _ENV_PROPAGATE = [
     ("LONGCAT_CHECKPOINT_DIR_VIDEO", CHECKPOINT_DIR_VIDEO),
     ("LONGCAT_CHECKPOINT_DIR_AVATAR_V1", DEFAULT_CHECKPOINT_DIR_AVATAR_V1),
     ("LONGCAT_CHECKPOINT_DIR_AVATAR_V15", DEFAULT_CHECKPOINT_DIR_AVATAR_V15),
-    ("LONGCAT_A100_40G_PROFILE", "1" if A100_40G_PROFILE_ENABLED else "0"),
+    ("LONGCAT_A100_40G_PROFILE", "1" if LOW_VRAM_PROFILE_ENABLED else "0"),
 ]
 for _env_name, _val in _ENV_PROPAGATE:
     if _val:  # never push an empty value (let a child keep its own default/env)

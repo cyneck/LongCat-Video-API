@@ -277,7 +277,7 @@ export LONGCAT_CHECKPOINT_DIR_AVATAR_V15=/path/to/LongCat-Video-Avatar-1.5
 | `LONGCAT_CONTEXT_PARALLEL_SIZE` | 跟随 GPU 数 | `1` | Context Parallel 大小 |
 | `LONGCAT_GPU_CONCURRENCY` | `1` | **`1`** | A100 40GB 不要并发跑多个生成任务 |
 | `LONGCAT_ENABLE_COMPILE` | `0` | `0` | 首轮 smoke test 保持关闭 |
-| `LONGCAT_A100_40G_PROFILE` | `1` | **`1`** | Avatar 1.5 安全封顶：强制 INT8+8 步蒸馏、分辨率封顶（只降不升）；**段数默认 `auto` 按音频时长自适应（与显存无关）**；不再静默覆盖 guidance；子参数见 `config.toml [profile]` |
+| `LONGCAT_A100_40G_PROFILE` | `（未设置）` | **auto（按显存）** | Avatar 1.5 安全封顶：强制 INT8+8 步蒸馏、分辨率封顶（只降不升）。**默认不再开启**——未显式设置时按真实最小 GPU 显存自动判定（≤50GB 才启用，80GB+/H100 不强制、不打“已被 profile 调整”日志、尊重调用方意图）；显式设 `1`/`0` 可覆盖自动判定。子参数见 `config.toml [profile]`；**段数默认 `auto` 按音频时长自适应（与显存无关）** |
 | `LONGCAT_WORK_DIR` | `./api_work` | 默认即可 | 上传 / 输出 / 日志目录 |
 | `LONGCAT_CHECKPOINT_DIR_VIDEO` | `weights/LongCat-Video` | 按实际路径 | 基础模型 |
 | `LONGCAT_CHECKPOINT_DIR_AVATAR_V1` | `weights/LongCat-Video-Avatar` | 可不下载 | Avatar v1.0 |
