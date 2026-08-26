@@ -109,6 +109,14 @@
   .switch .track::after { content: ""; position: absolute; top: 2px; left: 2px; width: 20px; height: 20px; border-radius: 50%; background: #fff; transition: .2s; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
   .switch input:checked + .track { background: var(--brand); }
   .switch input:checked + .track::after { transform: translateX(18px); }
+  /* 服务器强制开启的开关：置灰 + 文字提示，让用户一眼知道前端无法关闭 */
+  .switch.forced { opacity: .85; cursor: not-allowed; }
+  .switch.forced input { cursor: not-allowed; }
+  .switch.forced span:last-child::after {
+    content: "（服务器强制开启 · 40G 安全档，前端不可关）";
+    display: block; margin-top: 2px;
+    font-size: 12px; color: #d98c00; font-weight: 500;
+  }
 
   /* submit */
   .submit {
@@ -409,6 +417,28 @@ async function api(path, opts) {
 }
 
 // ---------- connection check ----------
+// 读取服务器 A100-40G 安全档状态，把被强制开启的 INT8 / distill 勾选框置灰+提示，
+// 让「参数到底有效还是无效」一眼可见：可勾选=前端能控；置灰=服务器强制、前端关不掉。
+function reflectForcedFlags(info) {
+  const fi = !!(info && info.force_use_int8);
+  const fd = !!(info && info.force_use_distill);
+  ["s-int8", "m-int8"].forEach((id) => markForced(id, fi));
+  ["s-distill", "m-distill"].forEach((id) => markForced(id, fd));
+}
+function markForced(id, forced) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const label = el.closest("label");
+  if (forced) {
+    el.checked = true;
+    el.disabled = true;
+    label.classList.add("forced");
+  } else {
+    el.disabled = false;
+    label.classList.remove("forced");
+  }
+}
+
 async function checkConn() {
   try {
     const info = await api("/health");
@@ -417,6 +447,8 @@ async function checkConn() {
     // 把实际使用的 API 地址显示出来，便于核对「API配置」是否真的生效（静态页连错主机一眼可见）
     setBanner("ok", "已连接 API：" + (API_BASE || location.origin) + "（" + (info.num_gpus||"?") + " 卡）");
     setTimeout(() => setBanner("", ""), 2600);
+    // 同步服务器强制开关状态到勾选框
+    reflectForcedFlags(info);
     loadHistory();
   } catch (e) {
     $("#connDot").className = "dot bad";
