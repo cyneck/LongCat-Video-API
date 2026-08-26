@@ -516,7 +516,9 @@ def generate(args):
 
     del vocal_separator
     pipe.audio_encoder = None
+    pipe.audio_feature_extractor = None
     audio_encoder = None
+    audio_feature_extractor = None
     gc.collect()
     torch_gc()
     _log_memory("after_audio_release", global_rank)
