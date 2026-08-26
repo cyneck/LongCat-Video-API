@@ -104,7 +104,13 @@ def parse_progress(log_text: str, fallback: ProgressSnapshot | None = None) -> P
     return best
 
 
-def _segment_percent(current: int, total: int) -> int:
+def _segment_start_percent(current: int, total: int) -> int:
+    total = max(1, int(total))
+    current = max(1, min(int(current), total))
+    return min(89, 45 + round(45 * (current - 1) / total))
+
+
+def _segment_done_percent(current: int, total: int) -> int:
     total = max(1, int(total))
     current = max(1, min(int(current), total))
     return min(90, 45 + round(45 * current / total))
@@ -112,7 +118,11 @@ def _segment_percent(current: int, total: int) -> int:
 
 def install_worker_progress_hooks(module) -> None:
     """Attach the shared reporter to an Avatar worker without parsing debug logs."""
-    state = {"total_segments": 0, "audio_separation_started": False}
+    state = {
+        "total_segments": 0,
+        "current_segment": 0,
+        "audio_separation_started": False,
+    }
     original_count = getattr(module, "_generated_frame_count", None)
     original_timing = getattr(module, "_log_timing", None)
     original_extract = getattr(module, "extract_vocal_from_speech", None)
@@ -136,6 +146,31 @@ def install_worker_progress_hooks(module) -> None:
             return original_extract(*args, **kwargs)
         module.extract_vocal_from_speech = extracting
 
+    pipeline_cls = getattr(module, "LongCatVideoAvatarPipeline", None)
+    if pipeline_cls is not None:
+        for method_name in ("generate_ai2v", "generate_at2v", "generate_avc"):
+            original_method = getattr(pipeline_cls, method_name, None)
+            if not callable(original_method):
+                continue
+
+            def make_segment_wrapper(method):
+                def wrapped(self, *args, **kwargs):
+                    state["current_segment"] += 1
+                    current = state["current_segment"]
+                    total = state["total_segments"] or current
+                    progress_event(
+                        _segment_start_percent(current, total),
+                        "video_generation",
+                        f"正在生成第 {current}/{total} 段",
+                        current_segment=current,
+                        total_segments=total,
+                        rank=worker_rank,
+                    )
+                    return method(self, *args, **kwargs)
+                return wrapped
+
+            setattr(pipeline_cls, method_name, make_segment_wrapper(original_method))
+
     if callable(original_timing):
         def timed(name, started_at, rank=0):
             elapsed = original_timing(name, started_at, rank)
@@ -151,7 +186,7 @@ def install_worker_progress_hooks(module) -> None:
                     current = int(m.group(1))
                     total = state["total_segments"] or current
                     progress_event(
-                        _segment_percent(current, total),
+                        _segment_done_percent(current, total),
                         "video_generation",
                         f"第 {current}/{total} 段已完成",
                         current_segment=current,
