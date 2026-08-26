@@ -13,6 +13,7 @@ change without breaking consumers.
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -54,17 +55,12 @@ def progress_event(
     rank: int = 0,
     **extra: Any,
 ) -> None:
-    """Emit one standardized progress event.
-
-    Multi-rank workers must pass their global rank; only rank 0 is allowed to
-    emit task-level progress to avoid duplicate/out-of-order events.
-    """
+    """Emit one standardized progress event; only global rank 0 may emit it."""
     if rank != 0:
         return
-    percent = max(0, min(100, int(percent)))
     payload = {
         "v": PROGRESS_VERSION,
-        "percent": percent,
+        "percent": max(0, min(100, int(percent))),
         "stage": str(stage),
         "detail": str(detail or ""),
         "current_segment": max(0, int(current_segment or 0)),
@@ -112,12 +108,7 @@ def _segment_percent(current: int, total: int) -> int:
 
 
 def install_worker_progress_hooks(module) -> None:
-    """Attach the standardized reporter to an Avatar worker module.
-
-    This keeps progress concerns out of ordinary debug logging. The existing
-    worker's timing helper remains responsible for performance logs; the wrapper
-    emits a separate progress event at explicit lifecycle boundaries.
-    """
+    """Attach the shared reporter to an Avatar worker without parsing debug logs."""
     state = {"total_segments": 0}
     original_count = getattr(module, "_generated_frame_count", None)
     original_timing = getattr(module, "_log_timing", None)
@@ -157,6 +148,10 @@ def install_worker_progress_hooks(module) -> None:
             return elapsed
         module._log_timing = timed
 
-    # A worker wrapper calls this immediately before entering generate(); model
-    # loading is the first expensive stage after distributed initialization.
-    progress_event(10, "model_loading", "正在加载模型与推理组件")
+    # torchrun imports this wrapper once per rank. Respect RANK for the initial
+    # event too so only global rank 0 writes task-level progress.
+    try:
+        initial_rank = int(os.environ.get("RANK", "0"))
+    except ValueError:
+        initial_rank = 0
+    progress_event(10, "model_loading", "正在加载模型与推理组件", rank=initial_rank)
