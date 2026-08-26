@@ -11,208 +11,298 @@
 
 | 项 | 要求 | 说明 |
 |---|---|---|
-| GPU 架构 | **Ampere 及以上**（A100 / H100 / L4 / RTX 30 / 40 系） | flash-attn 内核要求计算能力 ≥ 8.0；**T4（7.5）、V100（7.0）会在推理时挂掉**，即使 import 成功 |
-| CUDA 驱动 | 12.x（建议 ≥ 12.4） | `nvidia-smi` 看到的驱动版本需支持对应 CUDA |
-| Python | 3.11 / 3.12 | 本指南以 **3.12** 为例（需与 flash-attn wheel 的 `cp312` 对应） |
-| 显存 | 单卡 ≥ 24GB 较稳妥（13.6B 模型） | 具体取决于分辨率 / 段数 |
-| 模型权重 | ~40GB 磁盘 | `weights/LongCat-Video` + `weights/LongCat-Video-Avatar-1.5` |
-| 系统库 | `librosa` 依赖的 `libsndfile1` | Debian/Ubuntu：`apt-get install -y libsndfile1` |
+| GPU 架构 | **Ampere 及以上**（A100 / H100 / L4 / RTX 30 / 40 系） | flash-attn 内核要求计算能力 ≥ 8.0；T4（7.5）、V100（7.0）不适合作为本项目推理 GPU |
+| CUDA 驱动 | 12.x（建议 ≥ 12.4） | `nvidia-smi` 显示的驱动需支持对应 CUDA |
+| Python | 3.11 / 3.12 | 本指南以 **3.12** 为例，需与 flash-attn wheel 的 `cp312` 对应 |
+| 推荐显存 | **Avatar 1.5：A100 40GB 起，推荐 INT8 + distill** | 40GB 属于单卡保守运行档位；720p / 多段 / 多人会显著增加显存压力 |
+| 推荐系统内存 | **≥ 40GB，生产建议 64GB+** | 40GB RAM 可以部署，但模型加载和 OS 文件缓存空间较紧 |
+| 模型权重 | 约数十 GB | `weights/LongCat-Video` + `weights/LongCat-Video-Avatar-1.5` |
+| 系统库 | `libsndfile1`、`ffmpeg` | Debian/Ubuntu 用 apt 安装 |
 
 确认 GPU 与 CUDA：
 
 ```bash
 nvidia-smi
-nvcc --version        # 容器里可能没装 nvcc，看 nvidia-smi 右上角的 CUDA Version 即可
+nvcc --version        # 容器里可能没装 nvcc，看 nvidia-smi 右上角 CUDA Version 即可
 python --version
+free -h
 ```
+
+### 0.1 单卡 A100 40GB 默认运行档位
+
+当前 API 对 `avatar-v1.5` 默认启用面向 **1×A100 40GB** 的低显存 profile：
+
+```text
+model_type            avatar-v1.5
+resolution            480p
+num_segments          1
+num_inference_steps   8
+use_distill           true
+use_int8              true
+text_guidance_scale   1.0
+audio_guidance_scale  1.0
+GPU concurrency       1
+```
+
+即使旧版 H5 / 客户端仍显式提交 `50 steps / distill=false / int8=false`，后端也会把 Avatar 1.5 归一化到上述低显存档位，避免误走 BF16 高显存路径。
+
+若部署在 A100 80GB / H100 / 多卡环境，需要恢复完全由调用方控制，可设置：
+
+```bash
+export LONGCAT_A100_40G_PROFILE=0
+```
+
+> 注意：上游 Avatar 推理脚本仍使用 93 帧生成形状。A100 40GB 是目标兼容配置，但实际峰值显存仍应在目标服务器上用单任务 smoke test 验证。首轮不要直接跑 720p、多 segment 或 GPU 并发。
 
 ---
 
-## 1. 安装依赖（已修正坑版）
+## 1. 安装依赖
 
-仓库里有三个依赖文件，分工如下：
+仓库里有三个依赖文件：
 
-- `requirements_api.txt` — 仅 API 服务本身（fastapi / uvicorn / python-multipart），**必须装**
-- `requirements.txt` — 视频 / 数字人推理主依赖（torch / transformers / diffusers / flash-attn / OpenCV 等）
-- `requirements_avatar.txt` — 数字人专属依赖（librosa / onnxruntime / audio-separator 等）+ **系统库用 apt 装，不再是 pip 包**
+- `requirements_api.txt` — API 服务（FastAPI / Uvicorn / python-multipart）
+- `requirements.txt` — 视频 / 数字人推理主依赖（PyTorch / Transformers / Diffusers / flash-attn / OpenCV 等）
+- `requirements_avatar.txt` — 数字人专属依赖（librosa / ONNX Runtime / audio-separator 等）
 
-> ⚠️ `requirements.txt` 里的 `flash-attn==2.7.4.post1` 在 PyPI 只有源码包，直接 `pip install -r requirements.txt` 会触发 **10~30 分钟源码编译且容易失败**。
-> 正确做法：**先单独装预编译 wheel，再装其余依赖**（flash-attn 已满足后 pip 会自动跳过）。
+> `requirements.txt` 中的 `flash-attn==2.7.4.post1` 若直接从 PyPI 安装，通常会触发源码编译。生产部署建议先安装与 Python / PyTorch / CUDA / C++ ABI 匹配的预编译 wheel。
 
-### 1.1 装系统库 + API 服务依赖
+### 1.1 系统库 + API 依赖
 
 ```bash
-# 系统库（声音处理）
 apt-get update && apt-get install -y libsndfile1 ffmpeg
-
-# API 服务本身
 pip install -r requirements_api.txt
 ```
 
-### 1.2 装 PyTorch（CUDA 12.4 版）
+### 1.2 PyTorch（CUDA 12.4）
 
 ```bash
 pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0 \
   --index-url https://download.pytorch.org/whl/cu124
 ```
 
-> 为什么锁定 2.6.0：flash-attn 官方预编译 wheel 对 2.6 有现成版本；更高版本（如 2.13）暂无对应 wheel，会逼你源码编译踩坑。
+### 1.3 flash-attn 预编译 wheel
 
-### 1.3 装 flash-attn（预编译 wheel，重点是 **cxx11abiFALSE**）
+标准 pip PyTorch 使用 old C++ ABI（`_GLIBCXX_USE_CXX11_ABI=0`），所以需要选择 `cxx11abiFALSE`。
 
-标准 pip 安装的 PyTorch 用的是 **old C++ ABI**（`_GLIBCXX_USE_CXX11_ABI=0`），因此必须选名字带 **`cxx11abiFALSE`** 的 wheel。装错 `cxx11abiTRUE` 会出现：
-
-```
-ImportError: ... undefined symbol: _ZN3c105ErrorC2E ... NSt7__cxx1112basic_string ...
-```
-
-这就是 ABI 不匹配，不是版本问题，重装 FALSE 变体即可。
-
-下载并安装（Python 3.12 + torch 2.6 + CUDA 12.x）：
+Python 3.12 + PyTorch 2.6 + CUDA 12.x 示例：
 
 ```bash
-# 直接用官方 release 的预编译 wheel（cu12 通用 CUDA 12.x，无需精确到 12.4）
 WHEEL="flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl"
 wget "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/$WHEEL"
-
-# 若 GitHub 下载慢/被墙，走镜像（把整条 URL 前缀换成 gh-proxy.org/）
-# wget "https://gh-proxy.org/https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/$WHEEL"
-
 pip install "$WHEEL"
 rm -f "$WHEEL"
 ```
 
-> 选择 wheel 的三要素，缺一不可：
-> 1. `cu12`（对应 CUDA 12.x）或 `cu124`
-> 2. `torch2.6`（与上面装的 torch 2.6.0 对齐）
-> 3. `cxx11abiFALSE`（与标准 pip torch 的 old ABI 对齐）
-> 4. `cp312`（与你的 Python 3.12 对齐；若是 3.11 就找 `cp311`）
+wheel 需同时匹配：
 
-### 1.4 装其余推理依赖
+1. CUDA：`cu12` / 对应 CUDA 12.x
+2. PyTorch：`torch2.6`
+3. ABI：`cxx11abiFALSE`
+4. Python：3.12 使用 `cp312`，3.11 使用 `cp311`
+
+ABI 选错常见报错：
+
+```text
+ImportError: ... undefined symbol ... NSt7__cxx1112basic_string ...
+```
+
+### 1.4 其余推理依赖
 
 ```bash
-# 此时 requirements.txt 里的 flash-attn 已满足，pip 跳过编译
 pip install -r requirements.txt
 pip install -r requirements_avatar.txt
 ```
 
-### 1.5 冒烟验证
+### 1.5 环境冒烟验证
 
 ```bash
-python -c "import torch,flash_attn,transformers; \
-print('torch', torch.__version__, 'cuda', torch.cuda.is_available()); \
-print('flash_attn', flash_attn.__version__)"
+python - <<'PY'
+import torch, flash_attn, transformers, diffusers
+print("torch:", torch.__version__)
+print("cuda available:", torch.cuda.is_available())
+print("gpu:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)
+print("flash_attn:", flash_attn.__version__)
+print("transformers:", transformers.__version__)
+print("diffusers:", diffusers.__version__)
+PY
 ```
 
-看到版本号且无报错即环境就绪。**注意**：`torch.cuda.is_available()` 为 `True` 才算 GPU 可用。
+`torch.cuda.is_available()` 必须为 `True`。
 
 ---
 
 ## 2. 下载模型权重
 
-```bash
-pip install "huggingface_hub[cli]"
+### 2.1 推荐：完整下载两个 Hugging Face 模型仓库
 
-huggingface-cli download meituan-longcat/LongCat-Video \
+Avatar 1.5 **不需要额外单独下载 OpenAI Whisper**。项目读取的是 Avatar 权重仓库内部的：
+
+```text
+LongCat-Video-Avatar-1.5/
+├── base_model/
+├── base_model_int8/           # A100 40GB 默认使用
+├── whisper-large-v3/          # Avatar 1.5 音频编码器
+├── scheduler/
+├── lora/
+│   └── dmd_lora.safetensors   # 8-step distill
+└── vocal_separator/
+    └── Kim_Vocal_2.onnx       # 人声分离
+```
+
+因此最稳妥的方法是完整下载：
+
+```bash
+cd /opt/ml/cctv/LongCat-Video-API   # 改成你的实际仓库目录
+mkdir -p weights
+
+pip install -U huggingface_hub
+
+hf download meituan-longcat/LongCat-Video \
   --local-dir ./weights/LongCat-Video
 
-huggingface-cli download meituan-longcat/LongCat-Video-Avatar-1.5 \
+hf download meituan-longcat/LongCat-Video-Avatar-1.5 \
   --local-dir ./weights/LongCat-Video-Avatar-1.5
 ```
 
-### 2.1 国内下载（HF 被墙/超时首选）
+> 新版 `huggingface_hub` 推荐使用 `hf download`。旧的 `huggingface-cli download` 在部分环境仍可用，但本文统一使用 `hf` CLI。
 
-直连 HuggingFace 在大陆服务器经常超时或断流，改用官方镜像 `hf-mirror.com`，**两条命令前加一行环境变量即可**：
+Avatar 1.5 的 Whisper 在这里仅作为音频特征编码器使用，并不是运行时先做 ASR 再生成视频；模型代码直接读取 `whisper-large-v3` encoder hidden states。
+
+### 2.2 中国大陆服务器
+
+如果直连 Hugging Face 超时，可使用镜像 endpoint：
 
 ```bash
-pip install "huggingface_hub[cli]"
-
+pip install -U huggingface_hub
 export HF_ENDPOINT=https://hf-mirror.com
 
-hf-download() { huggingface-cli download "$1" --local-dir "$2"; }
+hf download meituan-longcat/LongCat-Video \
+  --local-dir ./weights/LongCat-Video
 
-hf-download meituan-longcat/LongCat-Video        ./weights/LongCat-Video
-hf-download meituan-longcat/LongCat-Video-Avatar-1.5 ./weights/LongCat-Video-Avatar-1.5
+hf download meituan-longcat/LongCat-Video-Avatar-1.5 \
+  --local-dir ./weights/LongCat-Video-Avatar-1.5
 ```
 
-> 镜像只加速「下载」环节，`HF_ENDPOINT` 仅影响 `huggingface-cli` 拉取地址；权重落盘后推理不再访问网络。
-> 若仍慢，可加 `--local-dir-use-symlinks False` 减少软链开销，或配合 `aria2` 多线程（见 `hf-mirror.com` 文档）。
+`HF_ENDPOINT` 只影响下载阶段，模型落盘后本地推理无需访问 Hugging Face。
 
-- 权重默认读取目录：`weights/LongCat-Video`（视频）、`weights/LongCat-Video-Avatar`（数字人 v1.0）、`weights/LongCat-Video-Avatar-1.5`（数字人 v1.5）。可用环境变量 `LONGCAT_CHECKPOINT_DIR_VIDEO` / `LONGCAT_CHECKPOINT_DIR_AVATAR_V1` / `LONGCAT_CHECKPOINT_DIR_AVATAR_V15` 覆盖（旧变量 `LONGCAT_CHECKPOINT_DIR_AVATAR` 仍可用，设了会同时覆盖两个版本）。
-- **v1.0 与 v1.5 是两套独立权重，目录布局不同，不能混用**：v1.0 在 `LongCat-Video-Avatar`（子目录 `avatar_single`/`avatar_multi` + `chinese-wav2vec2-base`），v1.5 在 `LongCat-Video-Avatar-1.5`（子目录 `base_model` + `whisper-large-v3`）。服务会按请求里的 `"model_type"` 自动选对应目录——`avatar-v1.0` 读 v1.0 目录，`avatar-v1.5` 读 v1.5 目录。
-- 若只用旧版数字人 v1.0，把 `LONGCAT_CHECKPOINT_DIR_AVATAR_V1` 指向 `weights/LongCat-Video-Avatar`，并在请求里设 `"model_type":"avatar-v1.0"`。
+> `hf-mirror.com` 是第三方镜像。生产环境如能正常访问 Hugging Face 官方 Hub，优先使用官方源。
 
-> ⚠️ **数字人强依赖基础视频模型**：`api/scripts/run_avatar_*.py` 里 tokenizer / text_encoder / vae / scheduler 来自**基础视频模型**。代码优先读环境变量 `LONGCAT_CHECKPOINT_DIR_VIDEO`，未设置时回退到 avatar 目录的**兄弟目录** `weights/LongCat-Video`（`checkpoint_dir/../LongCat-Video`，已用 `os.path.normpath` 归一化，避免中间目录缺失导致路径解析失败）。
-> - 默认布局：权重都下载到 `weights/` 下且同级（avatar 自动找到兄弟 `LongCat-Video`），即可直接跑。
-> - 若基础模型放在别处，设 `LONGCAT_CHECKPOINT_DIR_VIDEO=/path/to/LongCat-Video` 即可，**不再要求必须是兄弟目录**（服务启动时会把该变量显式注入子进程，回退路径基本不会触发）。
-> - 缺它会报 `OSError: Incorrect path_or_model_id: '.../LongCat-Video-Avatar-1.5/../LongCat-Video'`（或你自定义的 base 路径）。
-> 验证：`ls $LONGCAT_CHECKPOINT_DIR_VIDEO/tokenizer $LONGCAT_CHECKPOINT_DIR_VIDEO/text_encoder $LONGCAT_CHECKPOINT_DIR_VIDEO/vae $LONGCAT_CHECKPOINT_DIR_VIDEO/scheduler` 都应存在。
+如果模型仓库需要认证：
 
-> 🛡️ **权重就绪校验（fail-fast）**：服务启动时，基础视频模型缺失会告警（所有任务都依赖它）；数字人 v1.0/v1.5 则**只检查「已下载版本」的目录完整性，未下载的版本静默跳过**（不报错、不告警）。而每次提交数字人任务前，`/generate/avatar-single`、`/generate/avatar-multi` 会先调用 `config.check_weights(model_type, task_type)` 检查对应权重目录与必需子目录是否齐全——**缺失或版本错配会直接返回 HTTP 400 并给出下载命令**，而不是等到 torchrun 子进程崩了才暴露。这就把"下载了 v1.5 却在请求里写 v1.0"这类坑挡在了最前面。
+```bash
+hf auth login
+hf auth whoami
+```
+
+### 2.3 下载后目录校验
+
+基础模型必须包含共享的 tokenizer / text encoder / VAE / scheduler：
+
+```bash
+test -d weights/LongCat-Video/tokenizer && echo "tokenizer OK"
+test -d weights/LongCat-Video/text_encoder && echo "text_encoder OK"
+test -d weights/LongCat-Video/vae && echo "VAE OK"
+test -d weights/LongCat-Video/scheduler && echo "scheduler OK"
+```
+
+A100 40GB 默认 Avatar 1.5 profile 重点检查：
+
+```bash
+test -d weights/LongCat-Video-Avatar-1.5/base_model_int8 && echo "INT8 DiT OK"
+test -d weights/LongCat-Video-Avatar-1.5/whisper-large-v3 && echo "Whisper OK"
+test -f weights/LongCat-Video-Avatar-1.5/lora/dmd_lora.safetensors && echo "DMD LoRA OK"
+test -d weights/LongCat-Video-Avatar-1.5/vocal_separator && echo "Vocal separator OK"
+test -d weights/LongCat-Video-Avatar-1.5/scheduler && echo "Avatar scheduler OK"
+```
+
+全部出现 `OK` 后再启动 API。
+
+可以额外确认磁盘占用：
+
+```bash
+du -sh weights/LongCat-Video weights/LongCat-Video-Avatar-1.5
+```
+
+### 2.4 权重目录规则
+
+默认读取目录：
+
+- `weights/LongCat-Video` — 基础视频模型；Avatar 也从这里读取 tokenizer / UMT5 text encoder / VAE 等共享组件
+- `weights/LongCat-Video-Avatar` — Avatar v1.0
+- `weights/LongCat-Video-Avatar-1.5` — Avatar v1.5
+
+可通过以下环境变量覆盖：
+
+```text
+LONGCAT_CHECKPOINT_DIR_VIDEO
+LONGCAT_CHECKPOINT_DIR_AVATAR_V1
+LONGCAT_CHECKPOINT_DIR_AVATAR_V15
+LONGCAT_CHECKPOINT_DIR_AVATAR       # 旧兼容变量，会覆盖两个 Avatar 版本
+```
+
+v1.0 与 v1.5 是两套独立权重，目录结构不同，不能混用。
+
+Avatar 推理强依赖基础视频模型。基础模型若放在自定义目录，显式设置：
+
+```bash
+export LONGCAT_CHECKPOINT_DIR_VIDEO=/path/to/LongCat-Video
+export LONGCAT_CHECKPOINT_DIR_AVATAR_V15=/path/to/LongCat-Video-Avatar-1.5
+```
+
+服务在提交数字人任务前会执行权重就绪校验；缺失目录或版本错配会返回 HTTP 400，而不是等 torchrun 深层加载后才失败。
 
 ---
 
 ## 3. 生产配置（环境变量）
 
-全部通过环境变量设置，定义在 [`api/config.py`](api/config.py)。常用项：
+常用配置定义在 `api/config.py`：
 
-| 变量 | 默认值 | 生产建议 | 说明 |
+| 变量 | 默认值 | A100 40GB 建议 | 说明 |
 |---|---|---|---|
 | `LONGCAT_HOST` | `0.0.0.0` | `0.0.0.0` | 监听地址 |
-| `LONGCAT_PORT` | `8000` | 与容器暴露端口一致（如 `8080`） | 服务端口，**代码无硬编码，改这个即可** |
-| `LONGCAT_EMBED_H5` | `0` | `1` | 开启后 `/` 直接返回 H5 页面 |
-| `LONGCAT_AUTH` | `0` | `1` | 开启登录网关，未登录拦截所有接口 |
-| `LONGCAT_USER` | `admin` | **改成你的账号** | 登录用户名 |
-| `LONGCAT_PASS` | `admin` | **改成强密码** | 登录密码 |
-| `LONGCAT_AUTH_TOKEN` | `longcat-demo-token` | 可自定义（HttpOnly cookie 值） | 令牌随机串 |
-| `LONGCAT_NUM_GPUS` | `1` | 按可用卡数 | 每个任务的 GPU 数（=torchrun `nproc_per_node`） |
-| `LONGCAT_GPU_CONCURRENCY` | `1` | 默认串行 | 同时跑几个任务，多任务需分配不同 `master_port` |
-| `LONGCAT_WORK_DIR` | `./api_work` | 保持默认 | 上传 / 输出 / 日志根目录（已建议加入 `.gitignore`） |
-| `LONGCAT_CHECKPOINT_DIR_VIDEO` | `weights/LongCat-Video` | 按实际改 | 视频权重目录；**数字人脚本也从此读取共享的 tokenizer/text_encoder/vae/scheduler**（未设则回退到 avatar 目录的兄弟 `LongCat-Video`，且已由服务注入子进程） |
-| `LONGCAT_CHECKPOINT_DIR_AVATAR_V1` | `weights/LongCat-Video-Avatar` | 按实际改 | 数字人 **v1.0** 权重目录；请求 `model_type:"avatar-v1.0"` 时自动选用 |
-| `LONGCAT_CHECKPOINT_DIR_AVATAR_V15` | `weights/LongCat-Video-Avatar-1.5` | 按实际改 | 数字人 **v1.5** 权重目录（默认）；请求 `model_type:"avatar-v1.5"` 时自动选用 |
-| `LONGCAT_CHECKPOINT_DIR_AVATAR` | _(未设置)_ | 一般不需要 | 旧版总开关：一旦设置会**同时覆盖 v1.0 与 v1.5**（保持向后兼容），优先级高于上面两个分版本变量 |
+| `LONGCAT_PORT` | `8000` | 按暴露端口设置 | 服务端口 |
+| `LONGCAT_EMBED_H5` | `0` | `1` | `/` 返回内置 H5 |
+| `LONGCAT_AUTH` | `0` | `1` | 开启登录网关 |
+| `LONGCAT_USER` | `admin` | 自定义 | 登录用户名 |
+| `LONGCAT_PASS` | `admin` | 强密码 | 登录密码 |
+| `LONGCAT_AUTH_TOKEN` | `longcat-demo-token` | 随机串 | HttpOnly cookie token |
+| `LONGCAT_NUM_GPUS` | `1` | `1` | 每个任务使用 GPU 数 |
+| `LONGCAT_CONTEXT_PARALLEL_SIZE` | 跟随 GPU 数 | `1` | Context Parallel 大小 |
+| `LONGCAT_GPU_CONCURRENCY` | `1` | **`1`** | A100 40GB 不要并发跑多个生成任务 |
+| `LONGCAT_ENABLE_COMPILE` | `0` | `0` | 首轮 smoke test 保持关闭 |
+| `LONGCAT_A100_40G_PROFILE` | `1` | **`1`** | Avatar 1.5 自动使用 INT8 + 8-step distill 低显存档位 |
+| `LONGCAT_WORK_DIR` | `./api_work` | 默认即可 | 上传 / 输出 / 日志目录 |
+| `LONGCAT_CHECKPOINT_DIR_VIDEO` | `weights/LongCat-Video` | 按实际路径 | 基础模型 |
+| `LONGCAT_CHECKPOINT_DIR_AVATAR_V1` | `weights/LongCat-Video-Avatar` | 可不下载 | Avatar v1.0 |
+| `LONGCAT_CHECKPOINT_DIR_AVATAR_V15` | `weights/LongCat-Video-Avatar-1.5` | 按实际路径 | Avatar v1.5 |
 
-### 3.1 鉴权配置速查（直接抄）
-
-**最小必配（开启鉴权门禁）**：
-
-| 变量 | 值 | 说明 |
-|---|---|---|
-| `LONGCAT_AUTH` | `1` | 开启登录网关，未登录拦截所有接口 |
-| `LONGCAT_USER` | 自定义 | 登录账号 |
-| `LONGCAT_PASS` | 强密码 | 登录密码 |
-| `LONGCAT_EMBED_H5` | `1` | 提供 H5 登录页（浏览器访问 `/` 时跳 `/login`） |
-
-**等价命令行参数**（`python -m api.server --auth --user X --pass Y --embed-h5` 与上面四个环境变量完全等价；**命令行参数优先于环境变量**）：
-
-| 命令行参数 | 等价环境变量 |
-|---|---|
-| `--auth` | `LONGCAT_AUTH=1` |
-| `--user NAME` | `LONGCAT_USER=NAME` |
-| `--pass PWD`（别名 `--password`） | `LONGCAT_PASS=PWD` |
-| `--token TOK` | `LONGCAT_AUTH_TOKEN=TOK` |
-| `--embed-h5` | `LONGCAT_EMBED_H5=1` |
-
-**systemd 写法**（追加到 §4.2 的 `[Service]` 段）：
-
-```ini
-Environment=LONGCAT_AUTH=1
-Environment=LONGCAT_USER=admin
-Environment=LONGCAT_PASS=改成强密码
-Environment=LONGCAT_EMBED_H5=1
-```
-
-**启动验证**：
+### 3.1 A100 40GB 推荐环境变量
 
 ```bash
-curl -s http://127.0.0.1:8080/health        # 应返回 "auth": true
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/tasks   # 无 cookie -> 401
-curl -s -c /tmp/cj -X POST -d 'username=admin&password=改成强密码' http://127.0.0.1:8080/auth/login
-curl -s -b /tmp/cj http://127.0.0.1:8080/tasks    # 带 cookie -> 200
+export LONGCAT_NUM_GPUS=1
+export LONGCAT_CONTEXT_PARALLEL_SIZE=1
+export LONGCAT_GPU_CONCURRENCY=1
+export LONGCAT_A100_40G_PROFILE=1
+export LONGCAT_ENABLE_COMPILE=0
+
+export LONGCAT_CHECKPOINT_DIR_VIDEO="$PWD/weights/LongCat-Video"
+export LONGCAT_CHECKPOINT_DIR_AVATAR_V15="$PWD/weights/LongCat-Video-Avatar-1.5"
 ```
 
-> H5 页面用的是**相对地址**（`fetch("/health")`、上传 `/files/*`），所以改端口 / 反代域名对前端完全透明，无需改代码。
+### 3.2 鉴权配置
+
+```bash
+export LONGCAT_AUTH=1
+export LONGCAT_USER=admin
+export LONGCAT_PASS='改成强密码'
+export LONGCAT_EMBED_H5=1
+```
+
+等价命令行参数：
+
+```bash
+python -m api.server --auth --user admin --pass '改成强密码' --embed-h5
+```
 
 ---
 
@@ -221,26 +311,31 @@ curl -s -b /tmp/cj http://127.0.0.1:8080/tasks    # 带 cookie -> 200
 ### 4.1 前台 / 简单后台启动
 
 ```bash
-cd /opt/ml/cctv/LongCat-Video-API   # 改成你的仓库目录
+cd /opt/ml/cctv/LongCat-Video-API
 
 export LONGCAT_HOST=0.0.0.0
-export LONGCAT_PORT=8080            # 与容器暴露端口一致
+export LONGCAT_PORT=8080
 export LONGCAT_EMBED_H5=1
 export LONGCAT_AUTH=1
 export LONGCAT_USER=admin
 export LONGCAT_PASS='改成强密码'
 
-# 前台运行（Ctrl+C 停止）
-uvicorn api.server:app --host 0.0.0.0 --port 8080
+export LONGCAT_NUM_GPUS=1
+export LONGCAT_CONTEXT_PARALLEL_SIZE=1
+export LONGCAT_GPU_CONCURRENCY=1
+export LONGCAT_A100_40G_PROFILE=1
 
-# 或后台运行（日志落盘）
+uvicorn api.server:app --host 0.0.0.0 --port 8080
+```
+
+后台运行：
+
+```bash
 nohup uvicorn api.server:app --host 0.0.0.0 --port 8080 \
   > api_work/server.log 2>&1 &
 ```
 
-> 容器只暴露 `8080` 时，把 `LONGCAT_PORT` 和 `--port` 都设为 `8080`，服务进程内部就监听 8080，与容器端口对齐。
-
-### 4.2 用 systemd 守护（推荐生产）
+### 4.2 systemd（推荐生产）
 
 `/etc/systemd/system/longcat-api.service`：
 
@@ -258,6 +353,10 @@ Environment=LONGCAT_EMBED_H5=1
 Environment=LONGCAT_AUTH=1
 Environment=LONGCAT_USER=admin
 Environment=LONGCAT_PASS=改成强密码
+Environment=LONGCAT_NUM_GPUS=1
+Environment=LONGCAT_CONTEXT_PARALLEL_SIZE=1
+Environment=LONGCAT_GPU_CONCURRENCY=1
+Environment=LONGCAT_A100_40G_PROFILE=1
 Restart=on-failure
 RestartSec=5
 
@@ -268,25 +367,80 @@ WantedBy=multi-user.target
 ```bash
 systemctl daemon-reload
 systemctl enable --now longcat-api
-journalctl -u longcat-api -f     # 看日志
+journalctl -u longcat-api -f
+```
+
+### 4.3 启动验证
+
+```bash
+curl -s http://127.0.0.1:8080/health
+```
+
+如果启用了鉴权：
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/tasks
+curl -s -c /tmp/cj -X POST \
+  -d 'username=admin&password=改成强密码' \
+  http://127.0.0.1:8080/auth/login
+curl -s -b /tmp/cj http://127.0.0.1:8080/tasks
 ```
 
 ---
 
-## 5. 访问 H5 页面
+## 5. A100 40GB 首次推理验证
 
-1. 浏览器打开 `http://<服务器IP或域名>:8080/`
-2. 未登录会自动跳到 `http://<host>:8080/login`
-3. 输入 `LONGCAT_USER` / `LONGCAT_PASS`，登录后种下 HttpOnly cookie，自动回到 `/` 加载 H5
-4. 在 H5 里：上传图谱（图片）+ 语音（音频）→ 填提示词 → 提交 → 轮询进度 → 下载成片
+第一轮只跑：
 
-交互式 API 文档仍在 `http://<host>:8080/docs`（Swagger UI）。
+- Avatar v1.5
+- 单人 AI2V
+- 480p
+- 1 segment
+- INT8
+- distill / 8-step
+- GPU concurrency = 1
+
+生成期间监控：
+
+```bash
+watch -n 0.5 nvidia-smi
+```
+
+另一个终端监控系统内存：
+
+```bash
+watch -n 1 free -h
+```
+
+建议记录：
+
+- 峰值 GPU 显存
+- 峰值系统 RAM
+- 单段生成耗时
+- 是否发生 CUDA OOM / Linux OOM Killer
+
+如果 480p / 1 segment 已接近 40GB 显存上限，不要直接开启 720p 或多任务并发。
 
 ---
 
-## 6. 反向代理 / HTTPS（对外发布时建议）
+## 6. 访问 H5 页面
 
-H5 与 API 同源，用 Nginx 反代一个 8080 即可，无需额外配 CORS：
+1. 浏览器打开 `http://<服务器IP或域名>:8080/`
+2. 启用鉴权后会跳转 `/login`
+3. 使用 `LONGCAT_USER` / `LONGCAT_PASS` 登录
+4. 上传肖像图片 + 语音 → 填写 prompt → 提交生成 → 查看日志 / 下载视频
+
+Swagger UI：
+
+```text
+http://<host>:8080/docs
+```
+
+---
+
+## 7. Nginx / HTTPS
+
+H5 与 API 同源，只需要反代一个 API 端口：
 
 ```nginx
 server {
@@ -298,78 +452,154 @@ server {
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        client_max_body_size 200m;   # 上传图片/音频较大，调高限制
-        proxy_read_timeout 600s;     # 推理耗时，调高超时
+        client_max_body_size 200m;
+        proxy_read_timeout 600s;
     }
 }
 ```
 
-之后用 `certbot` 申请证书即可转 HTTPS。
+对外发布建议再配置 TLS/HTTPS。
 
 ---
 
-## 7. 更新流程（拉仓库新代码 → 重启）
+## 8. 更新流程
 
 ```bash
 cd /opt/ml/cctv/LongCat-Video-API
 git pull origin main
 
-# 如果依赖有变动（requirements*.txt 改动），重装
 pip install -r requirements_api.txt
 pip install -r requirements.txt
 pip install -r requirements_avatar.txt
 
-# 重启服务
-# 后台进程：kill 掉旧的 uvicorn 再 nohup 起；systemd：systemctl restart longcat-api
+# systemd
+systemctl restart longcat-api
 ```
+
+模型权重一般无需随着代码每次重新下载；只有上游权重版本发生变化时才需要更新。
 
 ---
 
-## 8. 常见问题排查
+## 9. 常见问题排查
 
-**Q1. `import flash_attn` 报 `undefined symbol ... NSt7__cxx1112basic_string`**
-ABI 不匹配。你装成了 `cxx11abiTRUE`，标准 pip torch 用 old ABI。解决：
+### Q1. `flash_attn` 报 `undefined symbol ... NSt7__cxx1112basic_string`
+
+ABI 不匹配。卸载并安装 `cxx11abiFALSE` 版本：
+
 ```bash
 pip uninstall -y flash-attn
-# 重装 1.3 节的 cxx11abiFALSE wheel
+# 按 §1.3 安装正确 wheel
 ```
 
-**Q1b. 推理子进程报 `ModuleNotFoundError: No module named 'longcat_video'`**
-推理脚本在 `api/scripts/` 下，只把脚本自身目录放进 `sys.path`，而 `longcat_video` 包在仓库根，导致 torchrun 子进程找不到它。仓库已在 `api/task_manager.py` 拉起子进程时自动把仓库根加入 `PYTHONPATH`（见第 1 节依赖 / 第 4 节启动）。若你仍遇到：
-- 先 `git pull` 确保已包含该修复（`api/task_manager.py` 的 `env["PYTHONPATH"]` 设置）；
-- 或临时手动验证：`PYTHONPATH=/opt/ml/cctv/LongCat-Video-API torchrun ... api/scripts/run_avatar_single.py ...`。
-- 直接 `python api/scripts/run_avatar_single.py`（不经过服务）也会报同样的错，因为它依赖服务注入的 `PYTHONPATH`。
+### Q2. `ModuleNotFoundError: No module named 'longcat_video'`
 
+API 的 task manager 会自动把仓库根目录加入 `PYTHONPATH`。如果直接手工执行 `api/scripts/run_avatar_*.py`，需确保：
 
+```bash
+export PYTHONPATH=/opt/ml/cctv/LongCat-Video-API:$PYTHONPATH
+```
 
-**Q2. `ModuleNotFoundError: No module named 'transformers'`**
-只装了 `requirements_api.txt`。补装：
+正常生产环境建议通过 API / task manager 启动推理子进程。
+
+### Q3. `ModuleNotFoundError: No module named 'transformers'`
+
+只安装了 API 依赖：
+
 ```bash
 pip install -r requirements.txt
 ```
 
-**Q3. 启动后访问 `/` 看到的是 JSON 而不是 H5**
-没开 `LONGCAT_EMBED_H5=1`，或 `h5/index.html` 不存在。确认环境变量生效且文件在仓库 `h5/` 下。
+### Q4. Avatar 1.5 报找不到 Whisper
 
-**Q4. 访问被 401 / 一直跳登录页**
-开 `LONGCAT_AUTH=1` 后，账号密码默认 `admin/admin`，或你设的 `LONGCAT_USER`/`LONGCAT_PASS`。`/health`、`/login`、`/auth/login` 免登录，其余都拦。
+不要单独把 Whisper 下载到 Hugging Face 默认 cache。项目预期路径是：
 
-**Q5. 推理卡住 / torchrun 报错 `ChildFailedError`**
-- 确认权重目录就位且 `LONGCAT_CHECKPOINT_DIR_*` 指向正确。
-- 多任务并行（`LONGCAT_GPU_CONCURRENCY>1`）时，需在 `api/task_manager.py` 给每个任务分配不同 `torchrun --master_port`，否则端口争抢。
-- 看具体日志：`GET /tasks/{task_id}/log`。
+```text
+weights/LongCat-Video-Avatar-1.5/whisper-large-v3
+```
 
-**Q6. 端口被占用**
-确认 `LONGCAT_PORT` 与 `--port` 一致，且没有其他进程占用该端口（`ss -ltnp | grep 8080`）。
+重新完整下载 Avatar 1.5：
 
-**Q7. GPU 不可用（`torch.cuda.is_available()` 为 False）**
-检查驱动 / CUDA；容器需带 `--gpus all` 或对应 device 映射；确认 `nvidia-smi` 能看到卡。
+```bash
+hf download meituan-longcat/LongCat-Video-Avatar-1.5 \
+  --local-dir ./weights/LongCat-Video-Avatar-1.5
+```
+
+### Q5. A100 40GB 报 CUDA OOM
+
+先确认请求实际使用：
+
+```text
+model_type=avatar-v1.5
+resolution=480p
+num_segments=1
+use_int8=true
+use_distill=true
+num_inference_steps=8
+```
+
+并确认：
+
+```bash
+export LONGCAT_A100_40G_PROFILE=1
+export LONGCAT_GPU_CONCURRENCY=1
+```
+
+若仍 OOM，先不要尝试 720p / 多段 / 多人；记录 `nvidia-smi` 峰值，再评估进一步模型 offload 或帧数优化。
+
+### Q6. Linux 进程被杀但没有 CUDA OOM
+
+很可能是 40GB 系统内存触发 OOM Killer：
+
+```bash
+dmesg -T | grep -Ei 'oom|killed process'
+free -h
+```
+
+生产建议把系统内存提升到 64GB 或以上。
+
+### Q7. 推理子进程 `ChildFailedError`
+
+查看任务日志：
+
+```text
+GET /tasks/{task_id}/log
+```
+
+重点检查：
+
+- 权重目录是否完整
+- INT8 / DMD / Whisper 子目录是否存在
+- CUDA / flash-attn 是否正常
+- 是否 OOM
+
+### Q8. `/` 返回 JSON 而不是 H5
+
+设置：
+
+```bash
+export LONGCAT_EMBED_H5=1
+```
+
+### Q9. GPU 不可用
+
+确认：
+
+```bash
+nvidia-smi
+python -c 'import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)'
+```
+
+容器环境需正确传递 GPU device。
 
 ---
 
-## 9. 目录与产物
+## 10. 目录与产物
 
-- 上传：`api_work/uploads/{images,videos,audios,jsons}/`
-- 产出：`api_work/outputs/<task_id>/`（mp4）
-- 日志：`api_work/logs/<task_id>.log` 与 `api_work/tasks.json`（任务状态库，重启后可查）
-- 建议把 `api_work/` 加入 `.gitignore`
+```text
+api_work/uploads/{images,videos,audios,jsons}/
+api_work/outputs/<task_id>/
+api_work/logs/<task_id>.log
+api_work/tasks.json
+```
+
+建议将 `api_work/` 保持在 `.gitignore` 中。
