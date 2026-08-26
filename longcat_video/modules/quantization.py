@@ -184,44 +184,58 @@ def load_quantized_dit(checkpoint_dir: str, subfolder: str = "base_model_int8", 
     # Override with kwargs
     config.update(kwargs)
 
-    # Instantiate model (empty weights)
-    model = LongCatVideoAvatarTransformer3DModel(**config)
+    # Build the model skeleton on the META device so it occupies ~0 CPU RAM.
+    # The previous path instantiated real (CPU) QuantizedLinear buffers first, which
+    # alone cost ~the full int8 weight size (~13.6GB) and, combined with the already
+    # resident text_encoder/vae, blew past container RAM and triggered the OOM killer
+    # (SIGKILL / exitcode -9) during INT8 DiT load *before a single shard was read*.
+    # With a meta skeleton + incremental materialization, peak CPU memory stays at
+    # ~one shard (+ text_encoder/vae already resident), independent of container RAM.
+    from accelerate import init_empty_weights
 
-    # Replace Linear layers with QuantizedLinear (empty)
-    skip_patterns = DEFAULT_SKIP_PATTERNS
-    modules_to_replace = {}
-    for name, module in model.named_modules():
-        if isinstance(module, nn.Linear):
-            should_skip = any(pattern in name for pattern in skip_patterns)
-            if not should_skip:
-                ql = QuantizedLinear(module.in_features, module.out_features, bias=module.bias is not None)
-                modules_to_replace[name] = ql
+    with init_empty_weights():
+        model = LongCatVideoAvatarTransformer3DModel(**config)
+        # Replace Linear layers with empty QuantizedLinear (meta buffers)
+        skip_patterns = DEFAULT_SKIP_PATTERNS
+        modules_to_replace = {}
+        for name, module in model.named_modules():
+            if isinstance(module, nn.Linear):
+                should_skip = any(pattern in name for pattern in skip_patterns)
+                if not should_skip:
+                    ql = QuantizedLinear(module.in_features, module.out_features, bias=module.bias is not None)
+                    modules_to_replace[name] = ql
+        for name, ql in modules_to_replace.items():
+            parts = name.split(".")
+            parent = model
+            for part in parts[:-1]:
+                parent = getattr(parent, part)
+            setattr(parent, parts[-1], ql)
 
-    for name, ql in modules_to_replace.items():
-        parts = name.split(".")
-        parent = model
-        for part in parts[:-1]:
-            parent = getattr(parent, part)
-        setattr(parent, parts[-1], ql)
-
-    # Load quantized state dict.
-    # Stream shards into the model one at a time instead of aggregating the whole
-    # checkpoint into a single CPU state_dict first. The old aggregate path peaked at
-    # ~entire-model CPU memory and was killed by the OOM killer (SIGKILL / exitcode -9)
-    # during INT8 DiT load; incremental loading keeps peak CPU memory at ~one shard.
+    # Stream shards, materializing each tensor onto CPU in place (meta -> real).
+    # Plain load_state_dict cannot copy into meta tensors, so we register real
+    # parameters/buffers per key as each shard arrives. Peak CPU stays at ~one shard.
     index_path = os.path.join(quantized_dir, "quantized_model.safetensors.index.json")
     if os.path.exists(index_path):
         with open(index_path, "r") as f:
             index = json.load(f)
-        shard_files = set(index["weight_map"].values())
+        shard_files = sorted(set(index["weight_map"].values()))
     else:
-        files = [f for f in os.listdir(quantized_dir) if f.endswith(".safetensors") and "index" not in f]
-        shard_files = set(files)
+        shard_files = sorted(
+            f for f in os.listdir(quantized_dir)
+            if f.endswith(".safetensors") and "index" not in f
+        )
 
-    for shard_file in sorted(shard_files):
+    for shard_file in shard_files:
         shard_path = os.path.join(quantized_dir, shard_file)
         shard_dict = load_file(shard_path, device="cpu")
-        model.load_state_dict(shard_dict, strict=False)
+        for key, tensor in shard_dict.items():
+            mod_name, attr = key.rsplit(".", 1)
+            mod = model.get_submodule(mod_name)
+            t = tensor.to("cpu")
+            if isinstance(getattr(mod, attr, None), nn.Parameter):
+                mod.register_parameter(attr, nn.Parameter(t))
+            else:
+                mod.register_buffer(attr, t, persistent=True)
         del shard_dict
 
     model.eval()

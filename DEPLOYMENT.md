@@ -592,11 +592,13 @@ python -c 'import torch; print(torch.cuda.is_available(), torch.cuda.get_device_
 容器环境需正确传递 GPU device。
 
 ### Q10. 加载模型时被系统强杀（`exitcode: -9` / SIGKILL，或日志出现 `Cannot initialize model with low cpu memory usage because 'accelerate' was not found`）
-根因是**加载期内存（CPU RAM）峰值过高**被 OOM killer 干掉，常见两步：
-1. **缺 `accelerate`**：`requirements.txt` 已补 `accelerate==0.30.1`。装上后 transformers 组件（UMT5/VAE）走 `low_cpu_mem_usage=True`，CPU 内存不再堆副本。验证：重跑日志不再出现 `...accelerate was not found`，且不再 `exitcode: -9`。
-2. **INT8 DiT 自研加载器**：`longcat_video/modules/quantization.py` 的 `load_quantized_dit` 原先把全部分片累加进同一 CPU state_dict 再一次性 `load_state_dict`，峰值 ≈ 整模型(~28GB)。已改为**分片流式加载**（每片读入即 `load_state_dict` + `del` 释放），峰值降到约一片(~4GB)。无需重装依赖，`git pull` 后重跑即可。
+根因是**加载期内存（CPU RAM）峰值过高**被 OOM killer 干掉，分三层逐步解决：
 
-若装了 `accelerate` 且已是分片加载仍 `-9`：说明宿主机 **RAM 本身不够**（容器常有限内存上限）。`free -h` 看可用内存；关掉同机其他大进程，或给容器调大内存上限。若 RAM 充足但仍杀，再看 **VRAM**：`nvidia-smi` 看显存，确认 `LONGCAT_USE_INT8=1`、调大 `LONGCAT_NUM_GPUS`（上下文并行把模型/激活摊到多卡）。
+1. **缺 `accelerate`**：`requirements.txt` 已补 `accelerate==0.30.1`。装上后 transformers 组件（UMT5/VAE）走 `low_cpu_mem_usage=True`，CPU 内存不再堆副本。验证：重跑日志不再出现 `...accelerate was not found`。
+2. **INT8 DiT 分片累加**：`longcat_video/modules/quantization.py` 的 `load_quantized_dit` 原先把全部分片累加进同一 CPU state_dict 再一次性 `load_state_dict`，峰值 ≈ 整模型。已改为**分片流式加载**（每片读入即落盘释放），峰值降到约一片。
+3. **INT8 DiT 骨架本身占满 CPU（当前根因）**：即便分片流式，旧实现仍先 `LongCatVideoAvatarTransformer3DModel(**config)` 实例化真实（CPU）骨架，其中每个 `QuantizedLinear` 一建出来就预分配整份 INT8 权重空 buffer（~13.6GB）驻留 CPU，叠加已加载的 text_encoder/VAE 直接顶爆容器内存——表现为打印 `[INFO] Loading INT8 quantized DiT model...` 后**立即** `exitcode: -9`、连分片进度都不打印。已改为用 `accelerate.init_empty_weights()` 在 **meta device** 上建骨架（CPU 占用≈0），再把分片**逐个 materialize 成真实张量**；峰值 CPU 仅约一片 + 已驻留的 text_encoder/VAE，**与容器 RAM 大小无关**。
+
+排查顺序：`git pull` 拿到最新 `load_quantized_dit` → 确认 `accelerate==0.30.1` 已装 → 重启服务重跑。若仍 `-9` 且日志停在 INT8 之前，说明宿主机 **RAM 本身不够**（容器常有限内存上限），`free -h` 看可用内存、关同机大进程或调大容器内存上限；若日志停在推理期则看 **VRAM**：`nvidia-smi` 确认 `LONGCAT_USE_INT8=1`、调大 `LONGCAT_NUM_GPUS`（上下文并行把激活摊到多卡）。
 
 ---
 
