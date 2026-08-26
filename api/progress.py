@@ -112,9 +112,15 @@ def _segment_percent(current: int, total: int) -> int:
 
 def install_worker_progress_hooks(module) -> None:
     """Attach the shared reporter to an Avatar worker without parsing debug logs."""
-    state = {"total_segments": 0}
+    state = {"total_segments": 0, "audio_separation_started": False}
     original_count = getattr(module, "_generated_frame_count", None)
     original_timing = getattr(module, "_log_timing", None)
+    original_extract = getattr(module, "extract_vocal_from_speech", None)
+
+    try:
+        worker_rank = int(os.environ.get("RANK", "0"))
+    except ValueError:
+        worker_rank = 0
 
     if callable(original_count):
         def counted(frame_plan, cond_frames):
@@ -122,13 +128,19 @@ def install_worker_progress_hooks(module) -> None:
             return original_count(frame_plan, cond_frames)
         module._generated_frame_count = counted
 
+    if callable(original_extract):
+        def extracting(*args, **kwargs):
+            if not state["audio_separation_started"]:
+                state["audio_separation_started"] = True
+                progress_event(30, "audio_separation", "正在提取数字人驱动人声", rank=worker_rank)
+            return original_extract(*args, **kwargs)
+        module.extract_vocal_from_speech = extracting
+
     if callable(original_timing):
         def timed(name, started_at, rank=0):
             elapsed = original_timing(name, started_at, rank)
             if name == "model_load":
                 progress_event(25, "model_ready", "模型加载完成，准备音频预处理", rank=rank)
-            elif name == "separator_init":
-                progress_event(30, "audio_separation", "人声分离模型已就绪", rank=rank)
             elif name == "vocal_separation":
                 progress_event(35, "audio_features", "人声分离完成，正在提取音频特征", rank=rank)
             elif name == "audio_embedding":
@@ -151,8 +163,4 @@ def install_worker_progress_hooks(module) -> None:
             return elapsed
         module._log_timing = timed
 
-    try:
-        initial_rank = int(os.environ.get("RANK", "0"))
-    except ValueError:
-        initial_rank = 0
-    progress_event(10, "model_loading", "正在加载模型与推理组件", rank=initial_rank)
+    progress_event(10, "model_loading", "正在加载模型与推理组件", rank=worker_rank)
