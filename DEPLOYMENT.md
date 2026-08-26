@@ -591,6 +591,13 @@ python -c 'import torch; print(torch.cuda.is_available(), torch.cuda.get_device_
 
 容器环境需正确传递 GPU device。
 
+### Q10. 加载模型时被系统强杀（`exitcode: -9` / SIGKILL，或日志出现 `Cannot initialize model with low cpu memory usage because 'accelerate' was not found`）
+根因是**加载期内存（CPU RAM）峰值过高**被 OOM killer 干掉，常见两步：
+1. **缺 `accelerate`**：`requirements.txt` 已补 `accelerate==0.30.1`。装上后 transformers 组件（UMT5/VAE）走 `low_cpu_mem_usage=True`，CPU 内存不再堆副本。验证：重跑日志不再出现 `...accelerate was not found`，且不再 `exitcode: -9`。
+2. **INT8 DiT 自研加载器**：`longcat_video/modules/quantization.py` 的 `load_quantized_dit` 原先把全部分片累加进同一 CPU state_dict 再一次性 `load_state_dict`，峰值 ≈ 整模型(~28GB)。已改为**分片流式加载**（每片读入即 `load_state_dict` + `del` 释放），峰值降到约一片(~4GB)。无需重装依赖，`git pull` 后重跑即可。
+
+若装了 `accelerate` 且已是分片加载仍 `-9`：说明宿主机 **RAM 本身不够**（容器常有限内存上限）。`free -h` 看可用内存；关掉同机其他大进程，或给容器调大内存上限。若 RAM 充足但仍杀，再看 **VRAM**：`nvidia-smi` 看显存，确认 `LONGCAT_USE_INT8=1`、调大 `LONGCAT_NUM_GPUS`（上下文并行把模型/激活摊到多卡）。
+
 ---
 
 ## 10. 目录与产物

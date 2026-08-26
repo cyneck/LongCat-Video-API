@@ -204,27 +204,26 @@ def load_quantized_dit(checkpoint_dir: str, subfolder: str = "base_model_int8", 
             parent = getattr(parent, part)
         setattr(parent, parts[-1], ql)
 
-    # Load quantized state dict
+    # Load quantized state dict.
+    # Stream shards into the model one at a time instead of aggregating the whole
+    # checkpoint into a single CPU state_dict first. The old aggregate path peaked at
+    # ~entire-model CPU memory and was killed by the OOM killer (SIGKILL / exitcode -9)
+    # during INT8 DiT load; incremental loading keeps peak CPU memory at ~one shard.
     index_path = os.path.join(quantized_dir, "quantized_model.safetensors.index.json")
     if os.path.exists(index_path):
         with open(index_path, "r") as f:
             index = json.load(f)
-        # Load from shards
         shard_files = set(index["weight_map"].values())
-        state_dict = {}
-        for shard_file in sorted(shard_files):
-            shard_path = os.path.join(quantized_dir, shard_file)
-            shard_dict = load_file(shard_path, device="cpu")
-            state_dict.update(shard_dict)
     else:
-        # Single file fallback
         files = [f for f in os.listdir(quantized_dir) if f.endswith(".safetensors") and "index" not in f]
-        state_dict = {}
-        for f in sorted(files):
-            shard_dict = load_file(os.path.join(quantized_dir, f), device="cpu")
-            state_dict.update(shard_dict)
+        shard_files = set(files)
 
-    model.load_state_dict(state_dict, strict=True)
+    for shard_file in sorted(shard_files):
+        shard_path = os.path.join(quantized_dir, shard_file)
+        shard_dict = load_file(shard_path, device="cpu")
+        model.load_state_dict(shard_dict, strict=False)
+        del shard_dict
+
     model.eval()
 
     # Cast non-quantized parameters (Conv3d, LayerNorm, etc.) to bfloat16
