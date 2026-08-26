@@ -76,7 +76,6 @@ def _auto_frame_plan(duration: float, fps: int, max_frames: int, cond_frames: in
         remaining = target_frames - covered
         new_frames = min(max_new_frames, remaining)
         segment_frames = _round_up_vae_frames(cond_frames + new_frames, max_frames)
-        # Continuations must contain at least one VAE temporal block of new frames.
         segment_frames = max(segment_frames, cond_frames + 4)
         segment_frames = _round_up_vae_frames(segment_frames, max_frames)
         plan.append(segment_frames)
@@ -115,24 +114,15 @@ def _log_onnx_provider_status(rank: int = 0):
 
 
 def _concat_and_mux(segment_paths, output_base, audio_path):
-    """Concat pure-video segments, then mux the original audio into MP4.
-
-    Video is stream-copied. Audio is always encoded to AAC because uploaded
-    WAV/FLAC inputs commonly contain PCM or other codecs that MP4 cannot accept
-    with ``-c copy``.
-    """
     list_path = output_base + ".concat.txt"
     merged = output_base + ".merged.mp4"
     final = output_base + ".mp4"
-
     with open(list_path, "w", encoding="utf-8") as f:
         for p in segment_paths:
             f.write(f"file '{os.path.abspath(p)}'\n")
-
     try:
         subprocess.run(
-            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path,
-             "-c", "copy", merged],
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", merged],
             check=True,
         )
         subprocess.run(
@@ -184,6 +174,9 @@ def generate(args):
     num_inference_steps = int(cfg.get("num_inference_steps", 50))
     text_guidance_scale = float(cfg.get("text_guidance_scale", 4.0))
     audio_guidance_scale = float(cfg.get("audio_guidance_scale", 4.0))
+    audio_drive_gain = float(cfg.get("audio_drive_gain", 0.85))
+    if not 0.5 <= audio_drive_gain <= 1.2:
+        raise ValueError(f"audio_drive_gain must be in [0.5, 1.2], got {audio_drive_gain}")
     ref_img_index = int(cfg.get("ref_img_index", 10))
     mask_frame_range = int(cfg.get("mask_frame_range", 3))
     model_type = cfg.get("model_type", "avatar-v1.0")
@@ -294,11 +287,6 @@ def generate(args):
     pipe.to(local_rank)
     timings["model_load"] = _log_timing("model_load", model_started, global_rank)
 
-    # The pipeline offloads UMT5 to CPU after the first prompt encoding to free
-    # several GB of VRAM. Continuation segments use the same prompt, so calling
-    # the original encoder again would feed CUDA token IDs into CPU embedding
-    # weights. Cache the small prompt embeddings from the first call and reuse
-    # them for every later segment instead of moving UMT5 back to the GPU.
     original_encode_prompt = pipe.encode_prompt
     prompt_cache = {}
 
@@ -316,11 +304,9 @@ def generate(args):
         if cached is not None:
             print("[longcat][prompt] reuse cached prompt embeddings", flush=True)
             return cached
-
         encoded = original_encode_prompt(*encode_args, **encode_kwargs)
         prompt_cache[cache_key] = tuple(
-            tensor.detach() if isinstance(tensor, torch.Tensor) else tensor
-            for tensor in encoded
+            tensor.detach() if isinstance(tensor, torch.Tensor) else tensor for tensor in encoded
         )
         return prompt_cache[cache_key]
 
@@ -331,8 +317,6 @@ def generate(args):
 
     frame_plan = [max_num_frames]
     if cp_rank == 0:
-        # The output duration must follow the ORIGINAL uploaded audio, not the
-        # separator result. Separation is only an embedding-preprocessing step.
         raw_duration = float(librosa.get_duration(path=raw_speech_path))
         if not math.isfinite(raw_duration) or raw_duration <= 0:
             raise ValueError(f"Invalid input audio duration: {raw_duration}")
@@ -385,6 +369,12 @@ def generate(args):
             sample_rate=sr,
             model_type=model_type,
         )
+        full_audio_emb = full_audio_emb * audio_drive_gain
+        print(
+            f"[longcat][audio] audio_drive_gain={audio_drive_gain:.2f} applied to audio embedding "
+            "(output audio volume unchanged)",
+            flush=True,
+        )
         timings["audio_embedding"] = _log_timing("audio_embedding", audio_embedding_started, global_rank)
         if torch.isnan(full_audio_emb).any():
             raise ValueError("broken audio embedding with nan values")
@@ -405,8 +395,6 @@ def generate(args):
         full_audio_emb = torch.zeros(*full_audio_emb_shape_list, dtype=torch.float32, device=local_rank)
         context_parallel_util.cp_broadcast(full_audio_emb)
 
-    # Current API profile uses one GPU (cp_size=1). Keep the existing multi-GPU
-    # behavior unchanged; dynamic frame planning is applied by rank 0.
     if cp_rank != 0:
         num_segments = max(1, int(num_segments_raw)) if not isinstance(num_segments_raw, str) else 1
         frame_plan = [max_num_frames] * num_segments
@@ -446,7 +434,6 @@ def generate(args):
         output = output[0]
         video = [(output[i] * 255).astype(np.uint8) for i in range(output.shape[0])]
         video = [PIL.Image.fromarray(img) for img in video]
-
         if cp_rank == 0:
             seg_path = os.path.join(output_dir, "segment_1")
             save_video_ffmpeg(torch.from_numpy(np.array(video)), seg_path, audio_path=None, fps=save_fps, quality=5)
@@ -474,7 +461,6 @@ def generate(args):
         output = output[0]
         video = [(output[i] * 255).astype(np.uint8) for i in range(output.shape[0])]
         video = [PIL.Image.fromarray(img) for img in video]
-
         if cp_rank == 0:
             seg_path = os.path.join(output_dir, "segment_1")
             save_video_ffmpeg(torch.from_numpy(np.array(video)), seg_path, audio_path=None, fps=save_fps, quality=5)
@@ -534,32 +520,21 @@ def generate(args):
         new_video = [(output[i] * 255).astype(np.uint8) for i in range(output.shape[0])]
         new_video = [PIL.Image.fromarray(img) for img in new_video]
         del output
-
         current_video = new_video
 
         if cp_rank == 0:
-            # AVC returns the conditioning overlap at the beginning of every
-            # continuation. Keep it for the next generation step, but do NOT
-            # persist it again or concat would duplicate 13 frames per segment.
             new_frames = new_video[num_cond_frames:]
             if not new_frames:
                 raise RuntimeError(
-                    f"Continuation segment {segment_idx+1} produced no new frames "
-                    f"after trimming {num_cond_frames} conditioning frames"
+                    f"Continuation segment {segment_idx+1} produced no new frames after trimming {num_cond_frames} conditioning frames"
                 )
             seg_path = os.path.join(output_dir, f"video_continue_{segment_idx+1}")
             save_video_ffmpeg(
-                torch.from_numpy(np.array(new_frames)),
-                seg_path,
-                audio_path=None,
-                fps=save_fps,
-                quality=5,
+                torch.from_numpy(np.array(new_frames)), seg_path, audio_path=None, fps=save_fps, quality=5
             )
             segment_paths.append(seg_path + ".mp4")
         torch_gc()
-        timings[f"segment_{segment_idx+1}"] = _log_timing(
-            f"segment_{segment_idx+1}", segment_started, global_rank
-        )
+        timings[f"segment_{segment_idx+1}"] = _log_timing(f"segment_{segment_idx+1}", segment_started, global_rank)
 
     if cp_rank == 0 and segment_paths:
         mux_started = time.perf_counter()
@@ -586,7 +561,5 @@ if __name__ == "__main__":
     try:
         generate(args)
     finally:
-        # torchrun reports a noisy NCCL resource-leak warning when an exception
-        # (for example ffmpeg failure) exits before the process group is closed.
         if dist.is_available() and dist.is_initialized():
             dist.destroy_process_group()
