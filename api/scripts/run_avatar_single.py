@@ -220,6 +220,38 @@ def generate(args):
     )
     pipe.to(local_rank)
 
+    # The pipeline offloads UMT5 to CPU after the first prompt encoding to free
+    # several GB of VRAM. Continuation segments use the same prompt, so calling
+    # the original encoder again would feed CUDA token IDs into CPU embedding
+    # weights. Cache the small prompt embeddings from the first call and reuse
+    # them for every later segment instead of moving UMT5 back to the GPU.
+    original_encode_prompt = pipe.encode_prompt
+    prompt_cache = {}
+
+    def cached_encode_prompt(*encode_args, **encode_kwargs):
+        cache_key = (
+            repr(encode_kwargs.get("prompt")),
+            repr(encode_kwargs.get("negative_prompt")),
+            bool(encode_kwargs.get("do_classifier_free_guidance", True)),
+            int(encode_kwargs.get("num_videos_per_prompt", 1)),
+            int(encode_kwargs.get("max_sequence_length", 512)),
+            str(encode_kwargs.get("dtype")),
+            str(encode_kwargs.get("device")),
+        )
+        cached = prompt_cache.get(cache_key)
+        if cached is not None:
+            print("[longcat][prompt] reuse cached prompt embeddings", flush=True)
+            return cached
+
+        encoded = original_encode_prompt(*encode_args, **encode_kwargs)
+        prompt_cache[cache_key] = tuple(
+            tensor.detach() if isinstance(tensor, torch.Tensor) else tensor
+            for tensor in encoded
+        )
+        return prompt_cache[cache_key]
+
+    pipe.encode_prompt = cached_encode_prompt
+
     generator = torch.Generator(device=local_rank)
     generator.manual_seed(seed + global_rank)
 
