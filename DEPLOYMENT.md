@@ -255,6 +255,13 @@ export LONGCAT_CHECKPOINT_DIR_AVATAR_V15=/path/to/LongCat-Video-Avatar-1.5
 
 ## 3. 生产配置（环境变量）
 
+所有可调参数集中在一个**全局配置文件 `config.toml`**（仓库根目录，模板见 `config.toml.example`）：
+
+- 复制即用：`cp config.toml.example config.toml` 后按需修改；也可用 `LONGCAT_CONFIG` 指定其他路径。
+- **取值优先级**：环境变量 `LONGCAT_*` ＞ `config.toml` ＞ `api/config.py` 内置默认。
+- **全局生效**：`config.toml` 里的值会在服务启动时回灌进环境变量，使每次请求拉起的 torchrun 子进程也继承同一份配置（真正统一管理，不必在两处各写一遍）。
+- 之前写死在代码里的「A100-40G 安全档子参数」和「鉴权账密」现已全部移入 `config.toml`（见 `[profile]` / `[server]`），代码不再保留字面量。
+
 常用配置定义在 `api/config.py`：
 
 | 变量 | 默认值 | A100 40GB 建议 | 说明 |
@@ -264,13 +271,13 @@ export LONGCAT_CHECKPOINT_DIR_AVATAR_V15=/path/to/LongCat-Video-Avatar-1.5
 | `LONGCAT_EMBED_H5` | `0` | `1` | `/` 返回内置 H5 |
 | `LONGCAT_AUTH` | `0` | `1` | 开启登录网关 |
 | `LONGCAT_USER` | `admin` | 自定义 | 登录用户名 |
-| `LONGCAT_PASS` | `admin` | 强密码 | 登录密码 |
-| `LONGCAT_AUTH_TOKEN` | `longcat-demo-token` | 随机串 | HttpOnly cookie token |
+| `LONGCAT_PASS` | 空(必填) | 强密码 | 登录密码；`auth_enabled=1` 时留空则**启动即失败退出**(fail-closed)，强制配置强密码 |
+| `LONGCAT_AUTH_TOKEN` | 空(随机) | 随机串 | 留空则启动时自动生成随机 cookie secret 并打印 |
 | `LONGCAT_NUM_GPUS` | `1` | `1` | 每个任务使用 GPU 数 |
 | `LONGCAT_CONTEXT_PARALLEL_SIZE` | 跟随 GPU 数 | `1` | Context Parallel 大小 |
 | `LONGCAT_GPU_CONCURRENCY` | `1` | **`1`** | A100 40GB 不要并发跑多个生成任务 |
 | `LONGCAT_ENABLE_COMPILE` | `0` | `0` | 首轮 smoke test 保持关闭 |
-| `LONGCAT_A100_40G_PROFILE` | `1` | **`1`** | Avatar 1.5 自动使用 INT8 + 8-step distill 低显存档位 |
+| `LONGCAT_A100_40G_PROFILE` | `1` | **`1`** | Avatar 1.5 安全封顶：强制 INT8+8 步蒸馏、分辨率/段数封顶（只降不升），不再静默覆盖 guidance；子参数见 `config.toml [profile]` |
 | `LONGCAT_WORK_DIR` | `./api_work` | 默认即可 | 上传 / 输出 / 日志目录 |
 | `LONGCAT_CHECKPOINT_DIR_VIDEO` | `weights/LongCat-Video` | 按实际路径 | 基础模型 |
 | `LONGCAT_CHECKPOINT_DIR_AVATAR_V1` | `weights/LongCat-Video-Avatar` | 可不下载 | Avatar v1.0 |

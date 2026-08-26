@@ -1,39 +1,88 @@
 """Configuration for the LongCat-Video FastAPI service.
 
-Override any value via environment variables (e.g. LONGCAT_CHECKPOINT_DIR,
-LONGCAT_NUM_GPUS, LONGCAT_WORK_DIR, LONGCAT_HOST, LONGCAT_PORT).
+Centralised, file-based configuration with environment-variable overrides.
+
+Resolution order (highest → lowest):
+    1. Environment variable (``LONGCAT_*``)  — keeps container/systemd deploys working
+    2. ``config.toml`` (path via ``LONGCAT_CONFIG``, default ``<repo>/config.toml``)
+    3. Built-in default in this file
+
+Why a config file: previously several "safe" defaults (the A100-40G runtime profile
+and the auth credentials) were hard-coded as literals in ``schemas.py`` / here. They
+are now declared ONCE in ``config.toml`` (see ``config.toml.example``) and read by the
+whole process, so tuning the service is a single-file, global change.
+
+After loading, values that came from ``config.toml`` (not from the environment) are
+written back into ``os.environ`` via ``setdefault`` so that the torchrun worker
+subprocesses launched per request inherit the same settings — that is what makes the
+file a *global* source of truth rather than something only the API process sees.
 """
 import os
+import tomllib
+import secrets
 from pathlib import Path
 
-
-# --- repository layout ---
+# ---------------------------------------------------------------------------
+# repository layout
+# ---------------------------------------------------------------------------
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = Path(__file__).resolve().parent / "scripts"
 
-# --- model weights ---
-# Each task maps to a checkpoint directory. Adjust if you keep weights elsewhere.
-CHECKPOINT_DIR_VIDEO = os.environ.get(
-    "LONGCAT_CHECKPOINT_DIR_VIDEO",
+# ---------------------------------------------------------------------------
+# config.toml loading
+# ---------------------------------------------------------------------------
+_CONFIG_PATH = Path(os.environ.get("LONGCAT_CONFIG", str(REPO_ROOT / "config.toml")))
+_cfg = {}
+if _CONFIG_PATH.is_file():
+    try:
+        with open(_CONFIG_PATH, "rb") as _f:
+            _cfg = tomllib.load(_f)
+    except Exception as _e:  # noqa: BLE001 - never let a bad config file crash import
+        print(f"[longcat][config] 读取 {_CONFIG_PATH} 失败，回退到环境变量/内置默认: {_e}", flush=True)
+
+
+def _section(name: str) -> dict:
+    return _cfg.get(name, {}) or {}
+
+
+def _env_or_cfg(section: str, key: str, env_name: str, default):
+    """env var wins; else config.toml; else built-in default."""
+    if env_name and env_name in os.environ:
+        return os.environ[env_name]
+    return _section(section).get(key, default)
+
+
+def _as_bool(v) -> bool:
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _as_int(v, default: int) -> int:
+    try:
+        return int(str(v).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+# ---------------------------------------------------------------------------
+# model weights
+# ---------------------------------------------------------------------------
+CHECKPOINT_DIR_VIDEO = _env_or_cfg(
+    "model", "checkpoint_dir_video", "LONGCAT_CHECKPOINT_DIR_VIDEO",
     str(REPO_ROOT / "weights" / "LongCat-Video"),
 )
 
-# Avatar (digital-human) weights ship as two independent revisions with
-# *different* directory layouts:
-#   - v1.0  -> LongCat-Video-Avatar      (avatar_single/avatar_multi + chinese-wav2vec2-base)
-#   - v1.5  -> LongCat-Video-Avatar-1.5  (base_model + whisper-large-v3)
-# They must NOT be mixed: requesting avatar-v1.0 against the v1.5 directory (or
-# vice-versa) fails at model load. We therefore resolve the checkpoint dir from
-# the requested model_type instead of a single shared path. Defaults only —
-# actual resolution happens in avatar_checkpoint_dir(), which re-reads the
-# environment on every call so overrides always take effect.
-DEFAULT_CHECKPOINT_DIR_AVATAR_V1 = str(REPO_ROOT / "weights" / "LongCat-Video-Avatar")
-DEFAULT_CHECKPOINT_DIR_AVATAR_V15 = str(REPO_ROOT / "weights" / "LongCat-Video-Avatar-1.5")
+DEFAULT_CHECKPOINT_DIR_AVATAR_V1 = _env_or_cfg(
+    "model", "checkpoint_dir_avatar_v1", "LONGCAT_CHECKPOINT_DIR_AVATAR_V1",
+    str(REPO_ROOT / "weights" / "LongCat-Video-Avatar"),
+)
+DEFAULT_CHECKPOINT_DIR_AVATAR_V15 = _env_or_cfg(
+    "model", "checkpoint_dir_avatar_v15", "LONGCAT_CHECKPOINT_DIR_AVATAR_V15",
+    str(REPO_ROOT / "weights" / "LongCat-Video-Avatar-1.5"),
+)
 
-# Kept for backward compatibility: legacy single-override deployments that set
-# only LONGCAT_CHECKPOINT_DIR_AVATAR keep working (see avatar_checkpoint_dir).
-CHECKPOINT_DIR_AVATAR = os.environ.get(
-    "LONGCAT_CHECKPOINT_DIR_AVATAR",
+# legacy single-override (still supported)
+CHECKPOINT_DIR_AVATAR = _env_or_cfg(
+    "model", "checkpoint_dir_avatar", "LONGCAT_CHECKPOINT_DIR_AVATAR",
     DEFAULT_CHECKPOINT_DIR_AVATAR_V15,
 )
 
@@ -42,44 +91,44 @@ def avatar_checkpoint_dir(model_type: str) -> str:
     """Resolve the avatar checkpoint directory for a given model_type.
 
     Reads LONGCAT_CHECKPOINT_DIR_AVATAR (legacy, overrides both revisions)
-    then LONGCAT_CHECKPOINT_DIR_AVATAR_V1 / _V15 (per-revision) at call time,
-    falling back to the default weights/ layout.
+    then LONGCAT_CHECKPOINT_DIR_AVATAR_V1 / _V15 (per-revision, possibly from
+    config.toml via the setdefault propagation below) at call time, falling
+    back to the default weights/ layout.
     """
     override = os.environ.get("LONGCAT_CHECKPOINT_DIR_AVATAR")
     if override:
         return override
     if model_type == "avatar-v1.0":
         return os.environ.get("LONGCAT_CHECKPOINT_DIR_AVATAR_V1") or DEFAULT_CHECKPOINT_DIR_AVATAR_V1
-    # default / avatar-v1.5
     return os.environ.get("LONGCAT_CHECKPOINT_DIR_AVATAR_V15") or DEFAULT_CHECKPOINT_DIR_AVATAR_V15
 
 
 def checkpoint_for_task(task_type: str, model_type: str = None) -> str:
-    """Pick the right weights dir for a task, version-aware for avatar tasks."""
     if task_type in ("avatar_single", "avatar_multi"):
         return avatar_checkpoint_dir(model_type or "avatar-v1.5")
     return CHECKPOINT_DIR_VIDEO
 
-# --- distributed / runtime ---
-NUM_GPUS = int(os.environ.get("LONGCAT_NUM_GPUS", "1"))            # number of GPUs per task
-CONTEXT_PARALLEL_SIZE = int(os.environ.get("LONGCAT_CONTEXT_PARALLEL_SIZE", str(NUM_GPUS)))
-ENABLE_COMPILE = os.environ.get("LONGCAT_ENABLE_COMPILE", "0") == "1"
-GPU_CONCURRENCY = int(os.environ.get("LONGCAT_GPU_CONCURRENCY", "1"))  # how many tasks may use GPUs at once
 
-# --- storage ---
-WORK_DIR = Path(os.environ.get("LONGCAT_WORK_DIR", str(REPO_ROOT / "api_work")))
+# ---------------------------------------------------------------------------
+# distributed / runtime
+# ---------------------------------------------------------------------------
+NUM_GPUS = _as_int(_env_or_cfg("runtime", "num_gpus", "LONGCAT_NUM_GPUS", "1"), 1)
+_cp = _as_int(_env_or_cfg("runtime", "context_parallel_size", "LONGCAT_CONTEXT_PARALLEL_SIZE", "0"), 0)
+CONTEXT_PARALLEL_SIZE = _cp if _cp and _cp > 0 else NUM_GPUS
+ENABLE_COMPILE = _as_bool(_env_or_cfg("runtime", "enable_compile", "LONGCAT_ENABLE_COMPILE", "0"))
+GPU_CONCURRENCY = _as_int(_env_or_cfg("runtime", "gpu_concurrency", "LONGCAT_GPU_CONCURRENCY", "1"), 1)
+
+# ---------------------------------------------------------------------------
+# storage
+# ---------------------------------------------------------------------------
+WORK_DIR = Path(_env_or_cfg("runtime", "work_dir", "LONGCAT_WORK_DIR", str(REPO_ROOT / "api_work")))
 UPLOAD_DIR = WORK_DIR / "uploads"
 OUTPUT_DIR = WORK_DIR / "outputs"
 LOG_DIR = WORK_DIR / "logs"
 TASK_DB = WORK_DIR / "tasks.json"
-
-# --- server ---
-HOST = os.environ.get("LONGCAT_HOST", "0.0.0.0")
-PORT = int(os.environ.get("LONGCAT_PORT", "8000"))
-
-# --- cleanup ---
-# upload files older than this many seconds are purged on start (0 = disabled)
-UPLOAD_TTL_SECONDS = int(os.environ.get("LONGCAT_UPLOAD_TTL_SECONDS", str(24 * 3600)))
+UPLOAD_TTL_SECONDS = _as_int(
+    _env_or_cfg("runtime", "upload_ttl_seconds", "LONGCAT_UPLOAD_TTL_SECONDS", str(24 * 3600)), 24 * 3600
+)
 
 ALLOWED_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 ALLOWED_VIDEO_EXT = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
@@ -91,9 +140,105 @@ def ensure_dirs():
         d.mkdir(parents=True, exist_ok=True)
 
 
-# --- weight readiness checks (fail fast with a friendly message) ---
-# Shared base model supplies tokenizer / text_encoder / vae / scheduler for every
-# task. Avatar revisions additionally need revision-specific subfolders.
+# ---------------------------------------------------------------------------
+# server
+# ---------------------------------------------------------------------------
+HOST = _env_or_cfg("server", "host", "LONGCAT_HOST", "0.0.0.0")
+PORT = _as_int(_env_or_cfg("server", "port", "LONGCAT_PORT", "8000"), 8000)
+
+# ---------------------------------------------------------------------------
+# auth — fail-closed
+#   * No built-in password / token any more. When auth is enabled the operator
+#     MUST supply one (via env or config.toml); otherwise the service refuses to
+#     start. A missing token is auto-generated randomly and printed at startup.
+# ---------------------------------------------------------------------------
+AUTH_ENABLED = _as_bool(_env_or_cfg("server", "auth_enabled", "LONGCAT_AUTH", "0"))
+AUTH_USER = _env_or_cfg("server", "auth_user", "LONGCAT_USER", "admin")
+AUTH_PASS = _env_or_cfg("server", "auth_pass", "LONGCAT_PASS", "")      # empty => must be set when auth on
+AUTH_TOKEN = _env_or_cfg("server", "auth_token", "LONGCAT_AUTH_TOKEN", "")  # empty => random at startup
+EMBED_H5 = _as_bool(_env_or_cfg("server", "embed_h5", "LONGCAT_EMBED_H5", "0"))
+H5_DIR = REPO_ROOT / "h5"
+HEALTH_PATH = "/health"
+
+
+def validate_auth():
+    """Fail-closed auth check. Call once at startup (after env/CLI overrides).
+
+    Raises RuntimeError if auth is enabled but no password was provided.
+    Auto-generates a random cookie secret when none is configured.
+    """
+    global AUTH_TOKEN
+    if not AUTH_ENABLED:
+        return
+    if not AUTH_PASS:
+        raise RuntimeError(
+            "鉴权已开启 (LONGCAT_AUTH=1 / config.toml [server].auth_enabled=true) "
+            "但未设置密码。请通过 LONGCAT_PASS 或 config.toml [server].auth_pass 设置强密码，"
+            "否则服务拒绝启动（fail-closed）。"
+        )
+    if not AUTH_TOKEN:
+        AUTH_TOKEN = secrets.token_hex(16)
+        print(
+            f"[longcat][auth] 未配置 auth_token，已自动生成随机 cookie secret: {AUTH_TOKEN}\n"
+            f"[longcat][auth]   如需固定 secret，请设置 LONGCAT_AUTH_TOKEN 或 config.toml [server].auth_token",
+            flush=True,
+        )
+
+
+# ---------------------------------------------------------------------------
+# A100-40G runtime profile — values come from config.toml, NOT hard-coded here.
+#   The API normalises avatar-v1.5 requests to these SAFE CEILINGS (clamp down
+#   only) so a 40GB card does not OOM, while still honouring caller intent where
+#   it is memory-safe. See api/schemas.py::apply_a100_40g_profile.
+# ---------------------------------------------------------------------------
+A100_40G_PROFILE_ENABLED = _as_bool(
+    _env_or_cfg("profile", "a100_40g_enabled", "LONGCAT_A100_40G_PROFILE", "1")
+)
+A100_40G = {
+    "max_resolution": _env_or_cfg("profile", "max_resolution", "LONGCAT_A100_40G_MAX_RESOLUTION", "480p"),
+    "max_num_segments": _as_int(
+        _env_or_cfg("profile", "max_num_segments", "LONGCAT_A100_40G_MAX_SEGMENTS", "1"), 1
+    ),
+    "forced_num_inference_steps": _as_int(
+        _env_or_cfg("profile", "forced_num_inference_steps", "LONGCAT_A100_40G_STEPS", "8"), 8
+    ),
+    "force_use_int8": _as_bool(_env_or_cfg("profile", "force_use_int8", "LONGCAT_A100_40G_FORCE_INT8", "1")),
+    "force_use_distill": _as_bool(_env_or_cfg("profile", "force_use_distill", "LONGCAT_A100_40G_FORCE_DISTILL", "1")),
+    "text_guidance_scale": float(
+        _env_or_cfg("profile", "text_guidance_scale", "LONGCAT_A100_40G_TEXT_GUIDANCE", "1.0")
+    ),
+    "audio_guidance_scale": float(
+        _env_or_cfg("profile", "audio_guidance_scale", "LONGCAT_A100_40G_AUDIO_GUIDANCE", "1.0")
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# propagate config.toml values into the environment so torchrun subprocesses
+# inherit them (global unified management). Env vars already set are preserved.
+# ---------------------------------------------------------------------------
+_ENV_PROPAGATE = [
+    ("LONGCAT_HOST", HOST),
+    ("LONGCAT_PORT", str(PORT)),
+    ("LONGCAT_NUM_GPUS", str(NUM_GPUS)),
+    ("LONGCAT_CONTEXT_PARALLEL_SIZE", str(CONTEXT_PARALLEL_SIZE)),
+    ("LONGCAT_ENABLE_COMPILE", "1" if ENABLE_COMPILE else "0"),
+    ("LONGCAT_GPU_CONCURRENCY", str(GPU_CONCURRENCY)),
+    ("LONGCAT_WORK_DIR", str(WORK_DIR)),
+    ("LONGCAT_UPLOAD_TTL_SECONDS", str(UPLOAD_TTL_SECONDS)),
+    ("LONGCAT_CHECKPOINT_DIR_VIDEO", CHECKPOINT_DIR_VIDEO),
+    ("LONGCAT_CHECKPOINT_DIR_AVATAR_V1", DEFAULT_CHECKPOINT_DIR_AVATAR_V1),
+    ("LONGCAT_CHECKPOINT_DIR_AVATAR_V15", DEFAULT_CHECKPOINT_DIR_AVATAR_V15),
+    ("LONGCAT_A100_40G_PROFILE", "1" if A100_40G_PROFILE_ENABLED else "0"),
+]
+for _env_name, _val in _ENV_PROPAGATE:
+    if _val:  # never push an empty value (let a child keep its own default/env)
+        os.environ.setdefault(_env_name, str(_val))
+
+
+# ---------------------------------------------------------------------------
+# weight readiness checks (fail fast with a friendly message)
+# ---------------------------------------------------------------------------
 BASE_MODEL_SUBFOLDERS = ["tokenizer", "text_encoder", "vae", "scheduler"]
 
 AVATAR_REQUIRED_SUBFOLDERS = {
@@ -101,7 +246,6 @@ AVATAR_REQUIRED_SUBFOLDERS = {
     "avatar-v1.5": ["base_model", "whisper-large-v3", "vocal_separator", "scheduler"],
 }
 
-# HuggingFace repo ids, used only to build the download hint in error messages.
 HF_REPO_VIDEO = "meituan-longcat/LongCat-Video"
 HF_REPO_AVATAR_V1 = "meituan-longcat/LongCat-Video-Avatar"
 HF_REPO_AVATAR_V15 = "meituan-longcat/LongCat-Video-Avatar-1.5"
@@ -119,20 +263,11 @@ def check_weights(model_type: str = None, task_type: str = None, skip_missing_di
     """Validate that the required weights are present on disk.
 
     Returns ``(ok, problems)`` where ``problems`` is a list of human-readable
-    strings describing exactly what is missing and how to fix it. This is used
-    both for per-request preflight and for the startup readiness check so a
-    misconfigured weight layout surfaces immediately instead of crashing deep
-    inside a torchrun subprocess.
-
-    ``skip_missing_dirs=True`` silences "directory does not exist" problems and
-    only validates the *integrity* of directories that ARE present. The startup
-    check uses this for avatar revisions (a not-yet-downloaded revision is not
-    an error — the per-request preflight still fails fast with download hints),
-    while the request preflight keeps it False to surface every missing piece.
+    strings describing exactly what is missing and how to fix it. Used both for
+    per-request preflight and the startup readiness check.
     """
     problems: list = []
 
-    # 1) shared base video model
     base_dir = CHECKPOINT_DIR_VIDEO
     if not os.path.isdir(base_dir):
         if not skip_missing_dirs:
@@ -146,7 +281,6 @@ def check_weights(model_type: str = None, task_type: str = None, skip_missing_di
         if missing:
             problems.append(f"[基础视频模型] {base_dir} 缺少子目录: {missing}")
 
-    # 2) avatar-specific revision
     if task_type in ("avatar_single", "avatar_multi"):
         mt = model_type or "avatar-v1.5"
         avatar_dir = avatar_checkpoint_dir(mt)
@@ -160,7 +294,6 @@ def check_weights(model_type: str = None, task_type: str = None, skip_missing_di
                 )
         else:
             required = AVATAR_REQUIRED_SUBFOLDERS.get(mt, [])
-            # only the dit subfolder matching this task is mandatory
             if mt == "avatar-v1.0":
                 dit = "avatar_single" if task_type == "avatar_single" else "avatar_multi"
                 required = [s for s in required if s in ("chinese-wav2vec2-base", "vocal_separator", dit)]
@@ -171,7 +304,9 @@ def check_weights(model_type: str = None, task_type: str = None, skip_missing_di
     return (len(problems) == 0, problems)
 
 
-# --- script dispatch table ---
+# ---------------------------------------------------------------------------
+# script dispatch table
+# ---------------------------------------------------------------------------
 SCRIPTS = {
     "text_to_video": SCRIPTS_DIR / "run_text_to_video.py",
     "image_to_video": SCRIPTS_DIR / "run_image_to_video.py",
@@ -179,14 +314,3 @@ SCRIPTS = {
     "avatar_single": SCRIPTS_DIR / "run_avatar_single.py",
     "avatar_multi": SCRIPTS_DIR / "run_avatar_multi.py",
 }
-
-# --- optional: H5 embedding + simple login gate ---
-# Flip on for production: LONGCAT_EMBED_H5=1 serves the H5 at "/",
-# LONGCAT_AUTH=1 requires login (cookie) before any endpoint.
-AUTH_ENABLED = os.environ.get("LONGCAT_AUTH", "0") == "1"
-AUTH_USER = os.environ.get("LONGCAT_USER", "admin")
-AUTH_PASS = os.environ.get("LONGCAT_PASS", "admin")
-AUTH_TOKEN = os.environ.get("LONGCAT_AUTH_TOKEN", "longcat-demo-token")  # secret stored in the HttpOnly cookie
-EMBED_H5 = os.environ.get("LONGCAT_EMBED_H5", "0") == "1"
-H5_DIR = REPO_ROOT / "h5"
-HEALTH_PATH = "/health"

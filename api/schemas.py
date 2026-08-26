@@ -5,18 +5,35 @@ the /files/upload endpoints — we keep heavy binary data out of the JSON body
 and avoid re-uploading on retries.
 
 The default avatar-v1.5 runtime profile targets one A100 40GB GPU. While
-LONGCAT_A100_40G_PROFILE=1 (the default), v1.5 requests are normalized to the
-INT8 + 8-step distilled path even if an older client/H5 explicitly sends the
-legacy high-memory values. Set LONGCAT_A100_40G_PROFILE=0 on larger systems to
-restore caller-controlled tuning.
+LONGCAT_A100_40G_PROFILE=1 (the default), v1.5 requests are clamped to SAFE
+CEILINGS (max resolution / max segments, and forced INT8 + 8-step distill for
+memory safety) so a 40GB card does not OOM. Caller-supplied values BELOW the
+ceiling, and the guidance scales, are always honoured — this profile only ever
+*reduces* memory-bound settings, never silently rewrites creative intent. Any
+change it makes is logged as a warning. All profile values live in
+config.toml [profile] (or the LONGCAT_A100_40G_* env vars), not in code.
+Set LONGCAT_A100_40G_PROFILE=0 on larger systems to disable the clamp entirely.
 """
 import os
+import logging
 from typing import Optional, Dict, List
 from pydantic import BaseModel, Field, model_validator
 
+from . import config
+
+logger = logging.getLogger("longcat.schemas")
+
+# resolution string -> (height, width) for ceiling comparison
+_RES_PX = {
+    "480p": (480, 832),
+    "720p": (720, 1280),
+    "1080p": (1080, 1920),
+}
+
 
 def _a100_40g_profile_enabled() -> bool:
-    return os.environ.get("LONGCAT_A100_40G_PROFILE", "1") == "1"
+    # value is resolved in config.py (config.toml > LONGCAT_A100_40G_PROFILE > default 1)
+    return config.A100_40G_PROFILE_ENABLED
 
 
 class TextToVideoRequest(BaseModel):
@@ -57,18 +74,45 @@ class VideoContinuationRequest(BaseModel):
 
 
 class _Avatar40GDefaults(BaseModel):
-    """Shared normalization for the single-A100 production profile."""
+    """Safe-ceiling normalization for the single-A100 production profile.
+
+    Values come from config.A100_40G (config.toml [profile], overridable by the
+    LONGCAT_A100_40G_* env vars). Nothing here is hard-coded in this file.
+    """
 
     @model_validator(mode="after")
     def apply_a100_40g_profile(self):
-        if _a100_40g_profile_enabled() and self.model_type == "avatar-v1.5":
-            self.resolution = "480p"
-            self.num_segments = 1
-            self.num_inference_steps = 8
-            self.text_guidance_scale = 1.0
-            self.audio_guidance_scale = 1.0
-            self.use_distill = True
+        if not _a100_40g_profile_enabled() or self.model_type != "avatar-v1.5":
+            return self
+        p = config.A100_40G
+        changed = []
+
+        # --- memory-safety: required on a 40G card, cannot be opted out ---
+        if p["force_use_int8"] and not self.use_int8:
             self.use_int8 = True
+            changed.append("use_int8=True")
+        if p["force_use_distill"] and not self.use_distill:
+            self.use_distill = True
+            changed.append("use_distill=True")
+        if self.num_inference_steps != p["forced_num_inference_steps"]:
+            self.num_inference_steps = p["forced_num_inference_steps"]
+            changed.append(f"num_inference_steps={p['forced_num_inference_steps']}")
+
+        # --- ceiling clamp: only reduce, never upgrade ---
+        cur = _RES_PX.get(self.resolution)
+        cap = _RES_PX.get(p["max_resolution"])
+        if cur and cap and (cur[0] > cap[0] or cur[1] > cap[1]):
+            self.resolution = p["max_resolution"]
+            changed.append(f"resolution 封顶 {p['max_resolution']}")
+        if self.num_segments > p["max_num_segments"]:
+            self.num_segments = p["max_num_segments"]
+            changed.append(f"num_segments 封顶 {p['max_num_segments']}")
+
+        # guidance scales are intentionally NOT touched — caller keeps creative control.
+        if changed:
+            logger.warning(
+                "avatar-v1.5 请求已被 A100-40G profile 调整: %s", "; ".join(changed)
+            )
         return self
 
 
@@ -80,8 +124,8 @@ class AvatarSingleRequest(_Avatar40GDefaults):
     resolution: str = "480p"
     num_segments: int = Field(1, ge=1, le=10)
     num_inference_steps: int = Field(8, ge=1, le=100)
-    text_guidance_scale: float = 1.0
-    audio_guidance_scale: float = 1.0
+    text_guidance_scale: float = config.A100_40G["text_guidance_scale"]
+    audio_guidance_scale: float = config.A100_40G["audio_guidance_scale"]
     ref_img_index: int = 10
     mask_frame_range: int = 3
     model_type: str = Field("avatar-v1.5", pattern="^(avatar-v1.0|avatar-v1.5)$")
@@ -101,8 +145,8 @@ class AvatarMultiRequest(_Avatar40GDefaults):
     resolution: str = "480p"
     num_segments: int = Field(1, ge=1, le=10)
     num_inference_steps: int = Field(8, ge=1, le=100)
-    text_guidance_scale: float = 1.0
-    audio_guidance_scale: float = 1.0
+    text_guidance_scale: float = config.A100_40G["text_guidance_scale"]
+    audio_guidance_scale: float = config.A100_40G["audio_guidance_scale"]
     ref_img_index: int = 10
     mask_frame_range: int = 3
     model_type: str = Field("avatar-v1.5", pattern="^(avatar-v1.0|avatar-v1.5)$")

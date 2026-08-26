@@ -355,6 +355,14 @@ def main():
     config.AUTH_PASS = os.environ.get("LONGCAT_PASS", config.AUTH_PASS)
     config.AUTH_TOKEN = os.environ.get("LONGCAT_AUTH_TOKEN", config.AUTH_TOKEN)
 
+    # fail-closed: refuse to start if auth is on without a real password
+    try:
+        config.validate_auth()
+    except RuntimeError as _e:
+        import sys
+        print(f"[longcat][auth] 启动失败: {_e}", file=sys.stderr, flush=True)
+        sys.exit(2)
+
     if config.AUTH_ENABLED:
         print(
             f"[longcat] 鉴权已开启: 账号={config.AUTH_USER!r} 密码={config.AUTH_PASS!r}\n"

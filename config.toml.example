@@ -1,0 +1,60 @@
+# =============================================================================
+# LongCat-Video-API 全局配置文件 (config.toml)
+# -----------------------------------------------------------------------------
+# 复制为 config.toml 后按需修改：  cp config.toml.example config.toml
+# 也可用环境变量 LONGCAT_CONFIG 指定其他路径。
+#
+# 取值优先级（高 -> 低）：
+#   1. 环境变量 LONGCAT_*        （容器 / systemd 部署最方便，优先权最高）
+#   2. 本文件 config.toml
+#   3. config.py 中的内置默认
+#
+# 注意：本文件里的值会在服务启动时回灌进环境变量，使每次请求拉起的
+# torchrun 子进程也能继承同一份配置（真正的“全局统一管理”）。
+# =============================================================================
+
+[server]
+host = "0.0.0.0"
+port = 8000
+# 鉴权门禁：开启后必须设置 auth_pass（见下方 fail-closed 说明）
+auth_enabled = false
+auth_user = "admin"
+# 密码：留空字符串 "" 表示“未设置”。一旦 auth_enabled=true 且密码为空，
+# 服务启动直接失败退出（fail-closed），强制你配置强密码。
+auth_pass = ""
+# cookie secret：留空则启动时自动生成随机值并打印（每次重启都会变）。
+# 想固定 secret 就在这里或 LONGCAT_AUTH_TOKEN 设置。
+auth_token = ""
+embed_h5 = false
+
+[model]
+# 权重目录：留空则用默认 <repo>/weights/... 布局
+checkpoint_dir_video = ""
+checkpoint_dir_avatar_v1 = ""
+checkpoint_dir_avatar_v15 = ""
+
+[runtime]
+num_gpus = 1
+# 上下文并行度：0 表示 = num_gpus
+context_parallel_size = 0
+enable_compile = false
+# 同时占用 GPU 的任务数
+gpu_concurrency = 1
+# 工作目录（上传/输出/日志）：留空用默认 <repo>/api_work
+work_dir = ""
+# 上传文件存活秒数（0=不清理）
+upload_ttl_seconds = 86400
+
+[profile]
+# 单卡 A100-40G 安全档：默认开启，对 avatar-v1.5 请求做“上限封顶”
+# （只降不升），并对显存有风险的项强制 INT8 + 8 步蒸馏以防 OOM。
+# 客户端低于上限的参数与 guidance 缩放一律保留，不再静默覆盖。
+a100_40g_enabled = true
+max_resolution = "480p"
+max_num_segments = 1
+forced_num_inference_steps = 8
+force_use_int8 = true
+force_use_distill = true
+# 以下两项仅作为 schema 默认值来源（客户端显式传值时不覆盖）
+text_guidance_scale = 1.0
+audio_guidance_scale = 1.0
