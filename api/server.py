@@ -33,7 +33,6 @@ Endpoints:
 """
 import os
 import shutil
-import time
 import uuid
 from pathlib import Path
 
@@ -43,7 +42,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from . import config
 from . import schemas
-from .task_manager import manager, TaskStatus
+from .task_manager import manager
 
 
 app = FastAPI(title="LongCat-Video API", version="0.1.0")
@@ -135,6 +134,17 @@ def _resolve_upload_path(p: str) -> str:
     return str(abs_p)
 
 
+async def _raw_request_params(request: Request, fallback: dict) -> dict:
+    """Return the exact client JSON before Pydantic/profile normalization."""
+    try:
+        payload = await request.json()
+        if isinstance(payload, dict):
+            return payload
+    except Exception:
+        pass
+    return dict(fallback)
+
+
 def _enqueue(task_type: str, task_input: dict, request_params: dict | None = None):
     task = manager.create(task_type, task_input, request_params=request_params)
     manager.schedule(task)
@@ -207,36 +217,40 @@ async def upload_json(file: UploadFile = File(...)):
 
 
 @app.post("/generate/text-to-video")
-async def gen_t2v(req: schemas.TextToVideoRequest):
-    request_params = req.model_dump()
-    return _enqueue("text_to_video", dict(request_params), request_params)
+async def gen_t2v(request: Request, req: schemas.TextToVideoRequest):
+    normalized = req.model_dump()
+    request_params = await _raw_request_params(request, normalized)
+    return _enqueue("text_to_video", dict(normalized), request_params)
 
 
 @app.post("/generate/image-to-video")
-async def gen_i2v(req: schemas.ImageToVideoRequest):
-    request_params = req.model_dump()
-    execution = dict(request_params)
+async def gen_i2v(request: Request, req: schemas.ImageToVideoRequest):
+    normalized = req.model_dump()
+    request_params = await _raw_request_params(request, normalized)
+    execution = dict(normalized)
     execution["cond_image"] = _resolve_upload_path(execution["cond_image"])
     return _enqueue("image_to_video", execution, request_params)
 
 
 @app.post("/generate/video-continuation")
-async def gen_vc(req: schemas.VideoContinuationRequest):
-    request_params = req.model_dump()
-    execution = dict(request_params)
+async def gen_vc(request: Request, req: schemas.VideoContinuationRequest):
+    normalized = req.model_dump()
+    request_params = await _raw_request_params(request, normalized)
+    execution = dict(normalized)
     execution["cond_video"] = _resolve_upload_path(execution["cond_video"])
     return _enqueue("video_continuation", execution, request_params)
 
 
 @app.post("/generate/avatar-single")
-async def gen_avatar_single(req: schemas.AvatarSingleRequest):
-    request_params = req.model_dump()
-    execution = dict(request_params)
+async def gen_avatar_single(request: Request, req: schemas.AvatarSingleRequest):
+    normalized = req.model_dump()
+    request_params = await _raw_request_params(request, normalized)
+    execution = dict(normalized)
     execution["cond_audio"] = {
-        k: _resolve_upload_path(v) for k, v in request_params["cond_audio"].items()
+        k: _resolve_upload_path(v) for k, v in normalized["cond_audio"].items()
     }
-    if request_params.get("cond_image"):
-        execution["cond_image"] = _resolve_upload_path(request_params["cond_image"])
+    if normalized.get("cond_image"):
+        execution["cond_image"] = _resolve_upload_path(normalized["cond_image"])
     if execution["stage_1"] == "ai2v" and not execution.get("cond_image"):
         raise HTTPException(status_code=400, detail="cond_image is required when stage_1='ai2v'")
     ok, problems = config.check_weights(execution["model_type"], "avatar_single")
@@ -249,12 +263,13 @@ async def gen_avatar_single(req: schemas.AvatarSingleRequest):
 
 
 @app.post("/generate/avatar-multi")
-async def gen_avatar_multi(req: schemas.AvatarMultiRequest):
-    request_params = req.model_dump()
-    execution = dict(request_params)
-    execution["cond_image"] = _resolve_upload_path(request_params["cond_image"])
+async def gen_avatar_multi(request: Request, req: schemas.AvatarMultiRequest):
+    normalized = req.model_dump()
+    request_params = await _raw_request_params(request, normalized)
+    execution = dict(normalized)
+    execution["cond_image"] = _resolve_upload_path(normalized["cond_image"])
     execution["cond_audio"] = {
-        k: _resolve_upload_path(v) for k, v in request_params["cond_audio"].items()
+        k: _resolve_upload_path(v) for k, v in normalized["cond_audio"].items()
     }
     if not any(execution["cond_audio"].values()):
         raise HTTPException(status_code=400, detail="at least one of person1/person2 audio is required")
