@@ -1,13 +1,12 @@
 """Compatibility entrypoint for avatar-multi.
 
-The optimized multi-avatar worker releases the heavy UMT5 text encoder after
-segment 1 because prompt embeddings are cached. AVC KV-cache setup still needs
-only text_encoder.config.d_model, however. Preserve that scalar metadata while
-allowing the actual encoder weights to be released.
+Preserves lightweight text-encoder metadata after UMT5 offload and installs the
+shared machine-readable task progress reporter before entering the worker.
 """
 import torch
 import torch.distributed as dist
 
+from api.progress import install_worker_progress_hooks
 from longcat_video.pipeline_longcat_video_avatar import LongCatVideoAvatarPipeline
 
 
@@ -60,7 +59,6 @@ def _cache_clean_latents_without_text_encoder(
     timestep = torch.zeros(cond_latents.shape[0], cond_latents.shape[2]).to(
         device=device, dtype=dtype
     )
-    # KV-cache warmup skips cross-attention, so these embeddings are shape-only.
     empty_embeds = torch.zeros(
         [cond_latents.shape[0], 1, model_max_length, d_model],
         device=device,
@@ -84,7 +82,9 @@ def _cache_clean_latents_without_text_encoder(
 LongCatVideoAvatarPipeline.__setattr__ = _capture_text_encoder_metadata
 LongCatVideoAvatarPipeline._cache_clean_latents = _cache_clean_latents_without_text_encoder
 
-import run_avatar_multi_impl as impl  # noqa: E402  (patch must be installed first)
+import run_avatar_multi_impl as impl  # noqa: E402
+
+install_worker_progress_hooks(impl)
 
 
 if __name__ == "__main__":
