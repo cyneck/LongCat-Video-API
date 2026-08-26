@@ -1,7 +1,7 @@
 "use strict";
 
 // Loaded after index.html's built-in script. Replace the old fixed 20/70/100%
-// animation with backend-reported stage progress while preserving log/video UI.
+// animation with backend-reported machine progress while preserving log/video UI.
 (function () {
   if (typeof window.renderResult !== "function") return;
 
@@ -13,7 +13,7 @@
     const p = data && data.progress ? data.progress : {};
     let percent = Number.isFinite(Number(p.percent)) ? Number(p.percent) : (status === "done" ? 100 : 0);
     percent = Math.max(0, Math.min(100, Math.round(percent)));
-    const stage = p.stage || (status === "pending" ? "排队中" : status === "running" ? "启动任务" : label);
+    const stage = p.stage_label || p.stage || (status === "pending" ? "排队中" : status === "running" ? "启动任务" : label);
     const detail = p.detail || "";
     const segment = p.total_segments ? ` · 第 ${p.current_segment || 0}/${p.total_segments} 段` : "";
 
