@@ -36,7 +36,7 @@ python --version
 - `requirements.txt` — 视频 / 数字人推理主依赖（torch / transformers / diffusers / flash-attn / OpenCV 等）
 - `requirements_avatar.txt` — 数字人专属依赖（librosa / onnxruntime / audio-separator 等）+ **系统库用 apt 装，不再是 pip 包**
 
-> ⚠️ **三份依赖都要装，缺一不可**（最常见踩坑）。数字人推理在加载 `longcat_video.audio_process` 时会 `import librosa`，在人声分离时会 `import audio_separator` / `onnx`——这些**全部只在 `requirements_avatar.txt` 里**。如果只装了前两份，现象是「启动 API 一切正常，但一跑数字人任务就报 `ModuleNotFoundError: No module named 'librosa'`（或 `'audio_separator'`、`'onnx'`）」。务必 `pip install -r requirements_avatar.txt`（见 1.4）。
+> ⚠️ **三份依赖都要装，缺一不可**（最常见踩坑）。数字人推理在加载 `longcat_video.audio_process` 时会 `import librosa` / `pyloudnorm`，在人声分离时会 `import audio_separator` / `onnx`——这些**全部只在 `requirements_avatar.txt` 里**。如果只装了前两份，现象是「启动 API 一切正常，但一跑数字人任务就报 `ModuleNotFoundError: No module named 'librosa'`（或 `'pyloudnorm'`、`'audio_separator'`、`'onnx'`）」。务必 `pip install -r requirements_avatar.txt`（见 1.4），且**一次性装完整个文件**，不要逐个装。
 
 > ⚠️ `requirements.txt` 里的 `flash-attn==2.7.4.post1` 在 PyPI 只有源码包，直接 `pip install -r requirements.txt` 会触发 **10~30 分钟源码编译且容易失败**。
 > 正确做法：**先单独装预编译 wheel，再装其余依赖**（flash-attn 已满足后 pip 会自动跳过）。
@@ -337,19 +337,23 @@ pip uninstall -y flash-attn
 pip install -r requirements.txt
 ```
 
-**Q2b. 跑数字人任务报 `ModuleNotFoundError: No module named 'librosa'`（或 `'audio_separator'` / `'onnx'`）**
-漏装了 `requirements_avatar.txt`。数字人推理依赖 librosa / soundfile / audio-separator / onnx / onnxruntime，它们**全部在 `requirements_avatar.txt`**，且 librosa 还需要系统库 `libsndfile1`。装到「实际跑推理的那个 Python 环境」里（容器里通常是 conda 环境，别装到系统 python）：
+**Q2b. 跑数字人任务报 `ModuleNotFoundError: No module named 'librosa'`（或 `'pyloudnorm'` / `'audio_separator'` / `'onnx'`）**
+漏装了 `requirements_avatar.txt`。数字人推理依赖 librosa / pyloudnorm / soundfile / audio-separator / onnx / onnxruntime，它们**全部在 `requirements_avatar.txt`**（其中 `pyloudnorm` 在 `longcat_video/audio_process/torch_utils.py`、`pipeline_longcat_video_avatar.py` 顶层导入；`audio_separator` 在 `api/scripts/run_avatar_*.py`、`api/inference_common.py` 顶层导入），且 librosa 还需要系统库 `libsndfile1`。
+
+> ⚠️ **必须一次性装完整个文件，不要 `pip install librosa` 这样逐个装**。这些包是「连锁顶层导入」：装好 librosa 后下一个缺的就是 pyloudnorm，再下一个是 audio_separator……逐个装会一直报错。直接装整份文件即可。
+
 ```bash
 # 系统库（librosa 的 libsndfile 运行时，必须 apt 装，pip 提供不了）
 apt-get install -y libsndfile1 ffmpeg
 
-# 装在跑推理的环境里（注意换成你的解释器路径）
+# 装在跑推理的环境里（注意换成你的解释器路径；一次性装完）
 /opt/conda/bin/python3.12 -m pip install -r requirements_avatar.txt
 
-# 验证
-/opt/conda/bin/python3.12 -c "import librosa, audio_separator, onnx; print('avatar deps ok')"
+# 验证（五个包都要 ok）
+/opt/conda/bin/python3.12 -c "import librosa, pyloudnorm, audio_separator, onnx, onnxruntime; print('avatar deps ok')"
 ```
 > 容器镜像若基于 `py3.12` 又单独建了 conda 环境，请用 `conda run -n <env> pip install -r requirements_avatar.txt` 或先 `conda activate <env>` 再装，否则依赖会落到 base 环境而 torchrun 用的是子环境，依旧 `ModuleNotFoundError`。
+> 若 `pip install -r requirements_avatar.txt` 中途某个包装失败（多半是 `audio-separator` 拉取 `onnxruntime`/`demucs` 等较重依赖超时），看报错行定位那个包，单独 `pip install <包>` 重试，再重跑整份文件。
 
 
 **Q3. 启动后访问 `/` 看到的是 JSON 而不是 H5**
