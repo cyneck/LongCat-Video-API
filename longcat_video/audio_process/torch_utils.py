@@ -179,6 +179,18 @@ def save_video_ffmpeg(gen_video_samples, save_path, audio_path=None, fps=25, qua
     video_audio = np.clip(video_audio, 0, 255).astype(np.uint8)
     save_video(video_audio, save_path_tmp, fps=fps, quality=quality)
 
+    # 纯视频模式（多段滑动窗口拼接场景）：不 mux 音频，直接输出为 save_path+'.mp4'。
+    # 完整音频由调用方在 _concat_and_mux 中一次性 mux，既避免逐段重复/错位 mux，
+    # 也保证内存仅「单段」级别（每段已落盘即释放）。
+    # 注意：必须在任何 subprocess 调用之前判断！否则 audio_path=None 会被当作 ffmpeg
+    # 的 -i 入参，触发 TypeError: expected str, bytes or os.PathLike object, not NoneType。
+    if audio_path is None:
+        save_path = save_path + ".mp4"
+        if os.path.exists(save_path):
+            os.remove(save_path)
+        os.rename(save_path_tmp, save_path)
+        return save_path
+
     # crop audio according to video length
     T, _, _, _ = gen_video_samples.shape
     duration = T / fps
@@ -210,13 +222,6 @@ def save_video_ffmpeg(gen_video_samples, save_path, audio_path=None, fps=25, qua
 
     # generate video with audio
     save_path = save_path + ".mp4"
-    if audio_path is None:
-        # 纯视频模式：不 mux 音频，直接输出。多段拼接场景由调用方最后统一 mux 一次完整音频，
-        # 既避免逐段重复/错位 mux，也保证内存只有「单段」级别（每段落盘即释放）。
-        if os.path.exists(save_path):
-            os.remove(save_path)
-        os.rename(save_path_tmp, save_path)
-        return save_path
     if high_quality_save:
         final_command = [
             "ffmpeg",

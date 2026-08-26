@@ -240,7 +240,7 @@
         <div style="margin-top:12px">
           <div class="row">
             <label class="fld"><span>推理步数</span><input type="number" id="s-steps" value="50" min="1" max="100" /></label>
-            <label class="fld"><span>片段数</span><input type="number" id="s-seg" value="1" min="1" max="10" /></label>
+            <label class="fld"><span>片段数</span><input type="text" id="s-seg" value="auto" inputmode="numeric" /><div class="hint">auto = 按音频时长自动分段（推荐）；填数字则固定段数。</div></label>
           </div>
           <div class="row">
             <label class="fld"><span>文本引导</span><input type="number" step="0.5" id="s-tgs" value="4.0" /></label>
@@ -321,7 +321,7 @@
         <div style="margin-top:12px">
           <div class="row">
             <label class="fld"><span>推理步数</span><input type="number" id="m-steps" value="50" min="1" max="100" /></label>
-            <label class="fld"><span>片段数</span><input type="number" id="m-seg" value="1" min="1" max="10" /></label>
+            <label class="fld"><span>片段数</span><input type="text" id="m-seg" value="auto" inputmode="numeric" /><div class="hint">auto = 按音频时长自动分段（推荐）；填数字则固定段数。</div></label>
           </div>
           <div class="row">
             <label class="fld"><span>文本引导</span><input type="number" step="0.5" id="m-tgs" value="4.0" /></label>
@@ -523,6 +523,16 @@ $("#btn-m-submit").addEventListener("click", () => submitMulti());
 
 function num(id, d) { const v = parseFloat($("#" + id).value); return isNaN(v) ? d : v; }
 
+// 片段数：auto（推荐）走后端「按音频时长自适应」；填数字则固定段数。
+// 必须与后端 api/scripts/run_avatar_single.py 的自适应逻辑保持一致，否则前端写死 1
+// 会让 21s 音频只生成约 3s 的单段视频。
+function segVal(id) {
+  const v = ($("#" + id).value || "").trim().toLowerCase();
+  if (v === "" || v === "auto") return "auto";
+  const n = parseInt(v, 10);
+  return isNaN(n) || n < 1 ? "auto" : n;
+}
+
 async function submitSingle() {
   if (!uploads["up-s-aud"].path) return toast("请先上传语音音频");
   if (sStage === "ai2v" && !uploads["up-s-img"].path) return toast("ai2v 模式需上传肖像图片（或切到 文+音 模式）");
@@ -532,7 +542,7 @@ async function submitSingle() {
     stage_1: sStage,
     resolution: $("#s-res").value,
     model_type: $("#s-model").value,
-    num_segments: Math.max(1, parseInt($("#s-seg").value) || 1),
+    num_segments: segVal("s-seg"),
     num_inference_steps: Math.max(1, parseInt($("#s-steps").value) || 50),
     text_guidance_scale: num("s-tgs", 4.0),
     audio_guidance_scale: num("s-ags", 4.0),
@@ -556,7 +566,7 @@ async function submitMulti() {
     audio_type: mAudio,
     resolution: $("#m-res").value,
     model_type: $("#m-model").value,
-    num_segments: Math.max(1, parseInt($("#m-seg").value) || 1),
+    num_segments: segVal("m-seg"),
     num_inference_steps: Math.max(1, parseInt($("#m-steps").value) || 50),
     text_guidance_scale: num("m-tgs", 4.0),
     audio_guidance_scale: num("m-ags", 4.0),
