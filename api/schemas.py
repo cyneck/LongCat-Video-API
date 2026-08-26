@@ -54,7 +54,7 @@ class AvatarSingleRequest(BaseModel):
     cond_audio: Dict[str, str] = Field(..., description='{"person1": "<audio upload path>"}')
     cond_image: Optional[str] = Field(None, description="required when stage_1='ai2v'")
     stage_1: str = Field("ai2v", pattern="^(at2v|ai2v)$")
-    resolution: str = Field("480p", pattern="^480p$", description="A100-40GB default profile is limited to 480p")
+    resolution: str = "480p"
     num_segments: int = Field(1, ge=1, le=10)
     num_inference_steps: int = Field(8, ge=1, le=100)
     text_guidance_scale: float = 1.0
@@ -75,7 +75,7 @@ class AvatarMultiRequest(BaseModel):
     )
     audio_type: str = Field("para", pattern="^(para|add)$")
     bbox: Optional[Dict[str, List[int]]] = None
-    resolution: str = Field("480p", pattern="^480p$", description="A100-40GB default profile is limited to 480p")
+    resolution: str = "480p"
     num_segments: int = Field(1, ge=1, le=10)
     num_inference_steps: int = Field(8, ge=1, le=100)
     text_guidance_scale: float = 1.0
