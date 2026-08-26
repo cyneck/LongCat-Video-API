@@ -49,29 +49,36 @@ def torch_gc():
 
 
 def _concat_and_mux(segment_paths, output_base, audio_path):
-    """ffmpeg concat 各段纯视频 + 一次性 mux 完整音频 → output_base+'.mp4'。
+    """Concat pure-video segments, then mux the original audio into MP4.
 
-    全程磁盘操作，内存仅「单段」级别（每段已落盘即释放），契合滑动窗口串行：
-    段数只影响总耗时，不额外占用显存/内存，故可在不溢出的前提下处理任意时长音频。
+    Video is stream-copied. Audio is always encoded to AAC because uploaded
+    WAV/FLAC inputs commonly contain PCM or other codecs that MP4 cannot accept
+    with ``-c copy``.
     """
     list_path = output_base + ".concat.txt"
-    with open(list_path, "w") as f:
+    merged = output_base + ".merged.mp4"
+    final = output_base + ".mp4"
+
+    with open(list_path, "w", encoding="utf-8") as f:
         for p in segment_paths:
             f.write(f"file '{os.path.abspath(p)}'\n")
-    merged = output_base + ".merged.mp4"
-    subprocess.run(
-        ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", merged],
-        check=True,
-    )
-    final = output_base + ".mp4"
-    subprocess.run(
-        ["ffmpeg", "-y", "-i", merged, "-i", audio_path,
-         "-c", "copy", "-map", "0:v:0", "-map", "1:a:0", "-shortest", final],
-        check=True,
-    )
-    for p in (list_path, merged):
-        if os.path.exists(p):
-            os.remove(p)
+
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path,
+             "-c", "copy", merged],
+            check=True,
+        )
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", merged, "-i", audio_path,
+             "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+             "-map", "0:v:0", "-map", "1:a:0", "-shortest", final],
+            check=True,
+        )
+    finally:
+        for p in (list_path, merged):
+            if os.path.exists(p):
+                os.remove(p)
     return final
 
 
@@ -100,11 +107,11 @@ def generate(args):
     prompt = cfg["prompt"]
     negative_prompt = cfg.get("negative_prompt", DEFAULT_NEGATIVE_PROMPT)
     raw_speech_path = cfg["cond_audio"]["person1"]
-    image_path = cfg.get("cond_image")  # None for at2v
-    stage_1 = cfg.get("stage_1", "ai2v")  # at2v / ai2v
+    image_path = cfg.get("cond_image")
+    stage_1 = cfg.get("stage_1", "ai2v")
     resolution = cfg.get("resolution", "480p")
-    num_segments_raw = cfg.get("num_segments", "auto")  # int 或 "auto"（按音频时长自适应）
-    print(f"[longcat][seg] 收到 num_segments={num_segments_raw!r}（'auto'=按音频时长自适应）", flush=True)
+    num_segments_raw = cfg.get("num_segments", "auto")
+    print(f"[longcat][seg] 收到 num_segments={num_segments_raw!r}（'auto'=按原始上传音频时长自适应）", flush=True)
     num_inference_steps = int(cfg.get("num_inference_steps", 50))
     text_guidance_scale = float(cfg.get("text_guidance_scale", 4.0))
     audio_guidance_scale = float(cfg.get("audio_guidance_scale", 4.0))
@@ -119,7 +126,7 @@ def generate(args):
     context_parallel_size = args.context_parallel_size
     output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
-    segment_paths = []  # 各段纯视频路径，最后统一 concat + mux 完整音频（内存仅单段级别）
+    segment_paths = []
 
     if use_distill and model_type == "avatar-v1.5":
         num_inference_steps = 8
@@ -141,7 +148,6 @@ def generate(args):
     else:
         raise ValueError(f"Unsupported resolution: {resolution}")
 
-    # prepare distributed environment
     rank = int(os.environ["RANK"])
     num_gpus = torch.cuda.device_count()
     local_rank = rank % num_gpus
@@ -155,13 +161,6 @@ def generate(args):
     cp_size = context_parallel_util.get_cp_size()
     cp_split_hw = context_parallel_util.get_optimal_split(cp_size)
 
-    # initialize models
-    # Base video model supplies the shared tokenizer/text_encoder/vae/scheduler.
-    # Default: sibling dir `LongCat-Video` next to the avatar checkpoint. Override with
-    # LONGCAT_CHECKPOINT_DIR_VIDEO to support arbitrary weights layouts.
-    # normpath collapses the `..` so the path resolves even when the intermediate
-    # avatar directory is absent (otherwise os.path.isdir trips on the missing
-    # component and HuggingFace reports "Incorrect path_or_model_id").
     _fallback = os.path.normpath(os.path.join(checkpoint_dir, "..", "LongCat-Video"))
     base_model_dir = os.environ.get("LONGCAT_CHECKPOINT_DIR_VIDEO") or _fallback
     tokenizer = AutoTokenizer.from_pretrained(base_model_dir, subfolder="tokenizer", torch_dtype=torch.bfloat16)
@@ -190,7 +189,6 @@ def generate(args):
     else:
         raise ValueError(f"Unsupported model_type: {model_type}. Expected 'avatar-v1.0' or 'avatar-v1.5'.")
 
-    # initialize audio models
     if model_type == "avatar-v1.0":
         audio_model_checkpoint_path = os.path.join(checkpoint_dir, "chinese-wav2vec2-base")
     elif model_type == "avatar-v1.5":
@@ -226,35 +224,59 @@ def generate(args):
     generator.manual_seed(seed + global_rank)
 
     if cp_rank == 0:
-        temp_vocal_path = extract_vocal_from_speech(raw_speech_path, f"/tmp/temp_speech_{generate_random_uid()}_{global_rank}_vocal.wav", vocal_separator, audio_output_dir_temp)
+        # The output duration must follow the ORIGINAL uploaded audio, not the
+        # separator result. Separation is only an embedding-preprocessing step.
+        raw_duration = float(librosa.get_duration(path=raw_speech_path))
+        if not math.isfinite(raw_duration) or raw_duration <= 0:
+            raise ValueError(f"Invalid input audio duration: {raw_duration}")
+
+        temp_vocal_path = extract_vocal_from_speech(
+            raw_speech_path,
+            f"/tmp/temp_speech_{generate_random_uid()}_{global_rank}_vocal.wav",
+            vocal_separator,
+            audio_output_dir_temp,
+        )
         assert temp_vocal_path is not None and os.path.exists(temp_vocal_path), "No vocal detected"
 
         speech_array, sr = librosa.load(temp_vocal_path, sr=16000)
-        source_duration = len(speech_array) / sr
+        vocal_duration = len(speech_array) / sr
 
-        # --- 自适应段数（audio 模式）：按音频时长算，不硬编码魔法数 ---
         if isinstance(num_segments_raw, str) and num_segments_raw.strip().lower() == "auto":
             first_seg_dur = num_frames / save_fps
             seg_advance = (num_frames - num_cond_frames) / save_fps
-            if source_duration <= first_seg_dur:
+            if raw_duration <= first_seg_dur:
                 num_segments = 1
             else:
-                num_segments = 1 + math.ceil((source_duration - first_seg_dur) / seg_advance)
+                num_segments = 1 + math.ceil((raw_duration - first_seg_dur) / seg_advance)
             _max_seg = config.LOW_VRAM.get("max_num_segments", 0)
             if _max_seg and _max_seg > 0 and num_segments > _max_seg:
-                print(f"[longcat][auto] num_segments={num_segments} 超过 profile 上限，封顶为 {_max_seg}", flush=True)
+                print(
+                    f"[longcat][auto] 计算得到 {num_segments} 段，但 profile max_num_segments={_max_seg}，"
+                    f"将封顶为 {_max_seg}；若希望完整覆盖音频，请将 max_num_segments 设为 0",
+                    flush=True,
+                )
                 num_segments = _max_seg
-            print(f"[longcat][auto] 音频 {source_duration:.1f}s → 自动 {num_segments} 段 (每段推进 {seg_advance:.2f}s)", flush=True)
+            print(
+                f"[longcat][auto] 原始音频 {raw_duration:.2f}s（分离后人声 {vocal_duration:.2f}s）"
+                f" → {num_segments} 段；首段 {first_seg_dur:.2f}s，后续每段新增 {seg_advance:.2f}s",
+                flush=True,
+            )
         else:
             num_segments = max(1, int(num_segments_raw))
             print(f"[longcat][seg] 使用固定段数 num_segments={num_segments}", flush=True)
 
         generate_duration = num_frames / save_fps + (num_segments - 1) * (num_frames - num_cond_frames) / save_fps
-        added_sample_nums = math.ceil((generate_duration - source_duration) * sr)
+        added_sample_nums = math.ceil((generate_duration - vocal_duration) * sr)
         if added_sample_nums > 0:
-            speech_array = np.append(speech_array, [0.0] * added_sample_nums)
+            speech_array = np.append(speech_array, np.zeros(added_sample_nums, dtype=speech_array.dtype))
 
-        full_audio_emb = pipe.get_audio_embedding(speech_array, fps=save_fps * audio_stride, device=local_rank, sample_rate=sr, model_type=model_type)
+        full_audio_emb = pipe.get_audio_embedding(
+            speech_array,
+            fps=save_fps * audio_stride,
+            device=local_rank,
+            sample_rate=sr,
+            model_type=model_type,
+        )
         if torch.isnan(full_audio_emb).any():
             raise ValueError("broken audio embedding with nan values")
 
@@ -274,10 +296,6 @@ def generate(args):
         full_audio_emb = torch.zeros(*full_audio_emb_shape_list, dtype=torch.float32, device=local_rank)
         context_parallel_util.cp_broadcast(full_audio_emb)
 
-    # Audio encoder (whisper-large-v3, ~3GB) is only needed for the one-time
-    # embedding extraction above. Offload it to CPU now to free GPU memory for
-    # the DiT forward — on a single A100-40GB the INT8 DiT + distill LoRA leave
-    # only ~720MB free and the LoRA branch OOMs without this headroom.
     pipe.audio_encoder = pipe.audio_encoder.to("cpu")
     torch.cuda.empty_cache()
 
@@ -355,7 +373,6 @@ def generate(args):
     width, height = video[0].size
     current_video = video
     ref_latent = latent[:, :, :1].clone()
-    all_generated_frames = video
 
     for segment_idx in range(1, num_segments):
         if local_rank == 0:
@@ -399,12 +416,26 @@ def generate(args):
         current_video = new_video
 
         if cp_rank == 0:
+            # AVC returns the conditioning overlap at the beginning of every
+            # continuation. Keep it for the next generation step, but do NOT
+            # persist it again or concat would duplicate 13 frames per segment.
+            new_frames = new_video[num_cond_frames:]
+            if not new_frames:
+                raise RuntimeError(
+                    f"Continuation segment {segment_idx+1} produced no new frames "
+                    f"after trimming {num_cond_frames} conditioning frames"
+                )
             seg_path = os.path.join(output_dir, f"video_continue_{segment_idx+1}")
-            save_video_ffmpeg(torch.from_numpy(np.array(new_video)), seg_path, audio_path=None, fps=save_fps, quality=5)
+            save_video_ffmpeg(
+                torch.from_numpy(np.array(new_frames)),
+                seg_path,
+                audio_path=None,
+                fps=save_fps,
+                quality=5,
+            )
             segment_paths.append(seg_path + ".mp4")
         torch_gc()
 
-    # 合并所有段纯视频 + 一次性 mux 完整音频（滑动窗口串行：内存仅单段级别，不溢出）
     if cp_rank == 0 and segment_paths:
         _concat_and_mux(segment_paths, os.path.join(output_dir, "output"), raw_speech_path)
 
@@ -420,4 +451,10 @@ def _parse_args():
 
 if __name__ == "__main__":
     args = _parse_args()
-    generate(args)
+    try:
+        generate(args)
+    finally:
+        # torchrun reports a noisy NCCL resource-leak warning when an exception
+        # (for example ffmpeg failure) exits before the process group is closed.
+        if dist.is_available() and dist.is_initialized():
+            dist.destroy_process_group()
