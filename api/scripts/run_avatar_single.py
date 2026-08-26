@@ -221,6 +221,13 @@ def generate(args):
         full_audio_emb = torch.zeros(*full_audio_emb_shape_list, dtype=torch.float32, device=local_rank)
         context_parallel_util.cp_broadcast(full_audio_emb)
 
+    # Audio encoder (whisper-large-v3, ~3GB) is only needed for the one-time
+    # embedding extraction above. Offload it to CPU now to free GPU memory for
+    # the DiT forward — on a single A100-40GB the INT8 DiT + distill LoRA leave
+    # only ~720MB free and the LoRA branch OOMs without this headroom.
+    pipe.audio_encoder = pipe.audio_encoder.to("cpu")
+    torch.cuda.empty_cache()
+
     indices = torch.arange(2 * 2 + 1) - 2
     audio_start_idx = 0
     audio_end_idx = audio_start_idx + audio_stride * num_frames

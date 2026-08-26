@@ -245,7 +245,15 @@ class LongCatVideoAvatarPipeline:
         else:
             negative_prompt_embeds = None
             negative_prompt_attention_mask = None
-            
+
+        # text_encoder (UMT5, ~2-3GB) is only needed for the prompt encoding
+        # above. Offload it to CPU now so the GPU memory is free for the DiT
+        # forward — on a single A100-40GB the INT8 DiT + distill LoRA already
+        # consume ~39GB and the LoRA branch OOMs without this headroom.
+        if torch.cuda.is_available():
+            self.text_encoder = self.text_encoder.to("cpu")
+            torch.cuda.empty_cache()
+
         return prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask
 
     def check_inputs(

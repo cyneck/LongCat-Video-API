@@ -600,6 +600,15 @@ python -c 'import torch; print(torch.cuda.is_available(), torch.cuda.get_device_
 
 排查顺序：`git pull` 拿到最新 `load_quantized_dit` → 确认 `accelerate==0.30.1` 已装 → 重启服务重跑。若仍 `-9` 且日志停在 INT8 之前，说明宿主机 **RAM 本身不够**（容器常有限内存上限），`free -h` 看可用内存、关同机大进程或调大容器内存上限；若日志停在推理期则看 **VRAM**：`nvidia-smi` 确认 `LONGCAT_USE_INT8=1`、调大 `LONGCAT_NUM_GPUS`（上下文并行把激活摊到多卡）。
 
+### Q11. 推理期 CUDA 显存不足（`torch.OutOfMemoryError` 且报错位于 `multi_lora_forward` / `longcat_video_dit_avatar.py`）
+这是单卡 A100-40GB 在 `LONGCAT_A100_40G_PROFILE=1`（默认）下走 **INT8 + 8 步蒸馏 LoRA** 时的典型现象：模型权重 + 蒸馏 LoRA 前向把显存顶到 ~39GiB，只差几百 MiB，LoRA 分支（`lx.to(weight_dtype)`）要的激活就触发 OOM。
+根因：`whisper-large-v3` 音频编码器（~3GB）与 `UMT5` 文本编码器（~2-3GB）**只在最开头各用一次**（提取音频 embedding / 编码 prompt），之后全程霸占 GPU 不释放。
+修复（已合入 main）：两处"用完即搬 CPU"——
+- `api/scripts/run_avatar_single.py`：`get_audio_embedding` 之后 `pipe.audio_encoder.to("cpu")` + `torch.cuda.empty_cache()`；
+- `longcat_video/pipeline_longcat_video_avatar.py`：`encode_prompt` 末尾 `self.text_encoder.to("cpu")` + `torch.cuda.empty_cache()`。
+两者合计释放 ~5-6GB，远超所需几百 MiB，推理即可通过。**无需调小分辨率/帧数，也无需关蒸馏。**
+若仍有极小概率 OOM：① 确认 `LONGCAT_A100_40G_PROFILE=1`（强制 480p/单段/8 步）；② 关掉同卡其他进程；③ 多卡时调大 `LONGCAT_NUM_GPUS` / `LONGCAT_CONTEXT_PARALLEL_SIZE` 把激活摊到多卡；④ 临时关闭蒸馏（`LONGCAT_A100_40G_PROFILE=0` 并在请求里 `use_distill=false`，代价是回到 50 步采样、更慢）。
+
 ---
 
 ## 10. 目录与产物
