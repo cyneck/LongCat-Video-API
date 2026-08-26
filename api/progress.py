@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -55,7 +56,7 @@ def progress_event(
     rank: int = 0,
     **extra: Any,
 ) -> None:
-    """Emit one standardized progress event; only global rank 0 may emit it."""
+    """Write one protocol event; only global rank 0 may emit task progress."""
     if rank != 0:
         return
     payload = {
@@ -68,7 +69,9 @@ def progress_event(
     }
     if extra:
         payload["meta"] = extra
-    print(PROGRESS_PREFIX + json.dumps(payload, ensure_ascii=False, separators=(",", ":")), flush=True)
+    line = PROGRESS_PREFIX + json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+    sys.stdout.write(line)
+    sys.stdout.flush()
 
 
 def parse_progress(log_text: str, fallback: ProgressSnapshot | None = None) -> ProgressSnapshot:
@@ -148,8 +151,6 @@ def install_worker_progress_hooks(module) -> None:
             return elapsed
         module._log_timing = timed
 
-    # torchrun imports this wrapper once per rank. Respect RANK for the initial
-    # event too so only global rank 0 writes task-level progress.
     try:
         initial_rank = int(os.environ.get("RANK", "0"))
     except ValueError:
