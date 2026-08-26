@@ -23,8 +23,13 @@ Endpoints:
 """
 import os
 import shutil
+import signal
+import subprocess
+import sys
 import time
 import uuid
+import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Request, Form
@@ -34,9 +39,101 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import config
 from . import schemas
 from .task_manager import manager, TaskStatus
+from .worker_client import WorkerClient
 
 
-app = FastAPI(title="LongCat-Video API", version="0.1.0")
+# --------------------------------------------------------------------------- #
+# in-process resident worker lifecycle
+# --------------------------------------------------------------------------- #
+def _launch_worker():
+    """Spawn the long-lived torchrun worker that keeps the avatar model loaded.
+
+    Launched with ``start_new_session=True`` so it lives in its own process
+    group and can be torn down cleanly via ``os.killpg`` on shutdown.
+    """
+    nproc = max(1, config.NUM_GPUS)
+    cmd = [
+        sys.executable, "-m", "torch.distributed.run",
+        f"--nproc_per_node={nproc}",
+        # distinct from the 29501 used by other task subprocesses so the
+        # long-lived worker and per-request torchrun launches don't clash.
+        "--master_port=29502",
+        "-m", "api.inference_worker",
+        "--checkpoint_dir", config.CHECKPOINT_DIR_AVATAR,
+        "--context_parallel_size", str(config.CONTEXT_PARALLEL_SIZE),
+        "--model_type", config.MODEL_TYPE,
+        "--avatar_mode", config.AVATAR_MODE,
+        "--host", config.WORKER_HOST,
+        "--port", str(config.WORKER_PORT),
+    ]
+    if config.USE_INT8:
+        cmd.append("--use_int8")
+
+    env = os.environ.copy()
+    existing_pp = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(config.REPO_ROOT)] + ([existing_pp] if existing_pp else [])
+    )
+    # make the base video-model dir visible to the worker's model loader
+    env["LONGCAT_CHECKPOINT_DIR_VIDEO"] = config.CHECKPOINT_DIR_VIDEO
+
+    log_path = config.LOG_DIR / "inference_worker.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    logf = open(log_path, "w", encoding="utf-8")
+    proc = subprocess.Popen(
+        cmd, cwd=str(config.REPO_ROOT), env=env,
+        stdout=logf, stderr=logf, start_new_session=True,
+    )
+    return proc
+
+
+async def _wait_worker_ready(client: WorkerClient, timeout: int = 1800) -> bool:
+    """Poll the worker's /health until the model is loaded (or timeout)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            st = client.health()
+        except Exception:
+            st = {}
+        if st.get("model_loaded"):
+            return True
+        await asyncio.sleep(5)
+    return False
+
+
+def _stop_worker(proc):
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    proc = None
+    client = None
+    if config.INPROCESS:
+        proc = _launch_worker()
+        client = WorkerClient(config.WORKER_HOST, config.WORKER_PORT)
+        ready = await _wait_worker_ready(client)
+        if ready:
+            config.WORKER_CLIENT = client
+            config.WORKER_PROC = proc
+            print("[server] in-process avatar worker is ready.")
+        else:
+            print("[server] WARNING: worker not ready within timeout; "
+                  "avatar-single will fall back to subprocess dispatch.")
+    try:
+        yield
+    finally:
+        if proc is not None:
+            _stop_worker(proc)
+
+
+app = FastAPI(title="LongCat-Video API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -274,7 +371,8 @@ def task_log(task_id: str):
 
 def main():
     import uvicorn
-    uvicorn.run("api.server:app", host=config.HOST, port=config.PORT, reload=False)
+    # `app` carries the lifespan that launches/stops the resident worker.
+    uvicorn.run(app, host=config.HOST, port=config.PORT, reload=False)
 
 
 if __name__ == "__main__":

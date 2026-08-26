@@ -36,6 +36,8 @@ python --version
 - `requirements.txt` — 视频 / 数字人推理主依赖（torch / transformers / diffusers / flash-attn / OpenCV 等）
 - `requirements_avatar.txt` — 数字人专属依赖（librosa / onnxruntime / audio-separator 等）+ **系统库用 apt 装，不再是 pip 包**
 
+> ⚠️ **三份依赖都要装，缺一不可**（最常见踩坑）。数字人推理在加载 `longcat_video.audio_process` 时会 `import librosa`，在人声分离时会 `import audio_separator` / `onnx`——这些**全部只在 `requirements_avatar.txt` 里**。如果只装了前两份，现象是「启动 API 一切正常，但一跑数字人任务就报 `ModuleNotFoundError: No module named 'librosa'`（或 `'audio_separator'`、`'onnx'`）」。务必 `pip install -r requirements_avatar.txt`（见 1.4）。
+
 > ⚠️ `requirements.txt` 里的 `flash-attn==2.7.4.post1` 在 PyPI 只有源码包，直接 `pip install -r requirements.txt` 会触发 **10~30 分钟源码编译且容易失败**。
 > 正确做法：**先单独装预编译 wheel，再装其余依赖**（flash-attn 已满足后 pip 会自动跳过）。
 
@@ -167,8 +169,39 @@ hf-download meituan-longcat/LongCat-Video-Avatar-1.5 ./weights/LongCat-Video-Ava
 | `LONGCAT_WORK_DIR` | `./api_work` | 保持默认 | 上传 / 输出 / 日志根目录（已建议加入 `.gitignore`） |
 | `LONGCAT_CHECKPOINT_DIR_VIDEO` | `weights/LongCat-Video` | 按实际改 | 视频权重目录；**数字人脚本也从此读取共享的 tokenizer/text_encoder/vae/scheduler**（未设则回退到 avatar 目录的兄弟 `LongCat-Video`） |
 | `LONGCAT_CHECKPOINT_DIR_AVATAR` | `weights/LongCat-Video-Avatar-1.5` | 按实际改 | 数字人权重目录 |
+| `LONGCAT_INPROCESS` | `1` | 默认开 | **一体化模式**：API 启动时拉起常驻推理 Worker，模型只加载一次，`avatar-single` 请求复用，免去每次冷启动重新加载 ~40GB 权重 |
+| `LONGCAT_WORKER_HOST` | `127.0.0.1` | 默认 | 常驻 Worker 监听地址（API 与 Worker 同机，一般无需改） |
+| `LONGCAT_WORKER_PORT` | `29500` | 默认 | 常驻 Worker HTTP 端口（Worker 内部 torchrun 的 `master_port` 另用 `29502`，与子进程任务的 `29501` 区分开） |
+| `LONGCAT_MODEL_TYPE` | `avatar-v1.5` | 按权重 | Worker 启动时加载的数字人模型类型（`avatar-v1.0` / `avatar-v1.5`） |
+| `LONGCAT_AVATAR_MODE` | `single` | 默认 | 进程内只支持 `single`；`multi` 仍走子进程路径 |
+| `LONGCAT_USE_INT8` | `0` | 按显存 | Worker 是否以 INT8 量化加载 DiT，省显存 |
 
 > H5 页面用的是**相对地址**（`fetch("/health")`、上传 `/files/*`），所以改端口 / 反代域名对前端完全透明，无需改代码。
+
+---
+
+### 3.1 一体化服务模式（in-process，默认开启）
+
+**背景**：旧模式下每个 `avatar-single` 请求都会 `fork` 一个 `torchrun` 子进程，把 ~40GB 权重从磁盘重新加载一遍（冷启动数分钟），请求结束即卸载。一体化模式改为：**API 启动时只加载一次模型，常驻在内存里，后续请求直接复用**。
+
+**架构**：
+- API 通过 FastAPI 的 `lifespan` 在启动时就拉起一个 `torchrun --nproc_per_node=N` 的常驻 Worker（`api/inference_worker.py`），保留多卡 + 序列并行（context parallel）以满足 13.6B 模型的显存需求。
+- `rank0` 在 Worker 内起一个本地 HTTP 服务（`127.0.0.1:29500`），提供 `GET /health`（探活 + 模型是否就绪）和 `POST /run`（提交一次推理）。
+- 收到 `avatar-single` 请求时，API 把 `{task_input, output_dir, checkpoint_dir}` 发给 Worker；`rank0` 用 `dist.broadcast_object_list` 把任务广播给其他 rank，所有 rank 一起跑一次上下文并行前向，最后 `rank0` 收集产物（mp4）返回。
+- 关闭 API 时，`lifespan` 通过进程组 `os.killpg` 干净结束整个 Worker。
+
+**好处**：
+- 首请求之后不再有「加载权重」的等待，延迟从「分钟级冷启动」降到「纯推理耗时」。
+- 仍保留 torchrun 多卡 + 序列并行，单进程放不下 13.6B 的问题不受影响。
+
+**回退**：若环境异常（如多卡初始化失败），设 `LONGCAT_INPROCESS=0` 即可回到原来的「每请求子进程」模式，行为与改动前一致。
+
+**v1 限制（重要）**：
+- 进程内只支持 `avatar-single`（单人数字人）。`avatar_multi`、文本/图像/续帧视频任务仍走原来的 `torchrun` 子进程路径，不影响。
+- Worker 启动时按 `LONGCAT_MODEL_TYPE` / `LONGCAT_USE_INT8` / `LONGCAT_CHECKPOINT_DIR_*` 一次性定型，运行中不支持每个请求切换模型类型或权重目录（如需切换，重启服务）。
+- 常驻 Worker 是单线程 HTTP，并发请求会串行处理；高并发场景仍建议配合 `LONGCAT_GPU_CONCURRENCY` 与多实例。
+
+**自检**：启动后 `curl http://127.0.0.1:29500/health` 应返回 `{"status":"ok","model_loaded":true,"mode":"single","busy":false}`；若 `model_loaded` 为 `false` 或不可达，看 `api_work/logs/inference_worker.log`。
 
 ---
 
@@ -303,6 +336,21 @@ pip uninstall -y flash-attn
 ```bash
 pip install -r requirements.txt
 ```
+
+**Q2b. 跑数字人任务报 `ModuleNotFoundError: No module named 'librosa'`（或 `'audio_separator'` / `'onnx'`）**
+漏装了 `requirements_avatar.txt`。数字人推理依赖 librosa / soundfile / audio-separator / onnx / onnxruntime，它们**全部在 `requirements_avatar.txt`**，且 librosa 还需要系统库 `libsndfile1`。装到「实际跑推理的那个 Python 环境」里（容器里通常是 conda 环境，别装到系统 python）：
+```bash
+# 系统库（librosa 的 libsndfile 运行时，必须 apt 装，pip 提供不了）
+apt-get install -y libsndfile1 ffmpeg
+
+# 装在跑推理的环境里（注意换成你的解释器路径）
+/opt/conda/bin/python3.12 -m pip install -r requirements_avatar.txt
+
+# 验证
+/opt/conda/bin/python3.12 -c "import librosa, audio_separator, onnx; print('avatar deps ok')"
+```
+> 容器镜像若基于 `py3.12` 又单独建了 conda 环境，请用 `conda run -n <env> pip install -r requirements_avatar.txt` 或先 `conda activate <env>` 再装，否则依赖会落到 base 环境而 torchrun 用的是子环境，依旧 `ModuleNotFoundError`。
+
 
 **Q3. 启动后访问 `/` 看到的是 JSON 而不是 H5**
 没开 `LONGCAT_EMBED_H5=1`，或 `h5/index.html` 不存在。确认环境变量生效且文件在仓库 `h5/` 下。

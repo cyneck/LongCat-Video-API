@@ -126,6 +126,35 @@ class TaskManager:
                 self._persist()
                 return
 
+            # ---- in-process (resident worker) fast path ----------------------
+            # avatar-single requests are served by the long-lived worker that
+            # already has the model in memory (no reload per request). The
+            # worker returns a list of {filename, size}; map them to download
+            # entries the same way the subprocess path does.
+            if config.INPROCESS and task.task_type == "avatar_single" and config.WORKER_CLIENT is not None:
+                try:
+                    with open(task.input_path, "r", encoding="utf-8") as f:
+                        cfg = json.load(f)
+                    payload = {
+                        "task_id": task.task_id,
+                        "task_input": cfg,
+                        "output_dir": task.output_dir,
+                        "checkpoint_dir": checkpoint,
+                    }
+                    resp = await asyncio.to_thread(config.WORKER_CLIENT.submit, payload)
+                    if resp.get("status") == "done":
+                        task.status = TaskStatus.DONE
+                        task.outputs = self._attach_urls(task, resp.get("outputs", []))
+                    else:
+                        task.status = TaskStatus.FAILED
+                        task.error = resp.get("error", "worker returned status=failed")
+                except Exception as e:  # noqa: BLE001
+                    task.status = TaskStatus.FAILED
+                    task.error = f"worker submit failed: {e}"
+                task.finished_at = time.time()
+                self._persist()
+                return
+
             log_path = config.LOG_DIR / f"{task.task_id}.log"
             cmd = self._build_cmd(script, checkpoint, task)
 
@@ -188,6 +217,20 @@ class TaskManager:
                 "filename": p.name,
                 "size": p.stat().st_size,
                 "download_url": f"/tasks/{task.task_id}/files/{p.name}",
+            })
+        return results
+
+    def _attach_urls(self, task: Task, outputs: list) -> list:
+        """Map worker-returned {filename, size} entries to download entries."""
+        results = []
+        for o in outputs:
+            fn = o.get("filename")
+            if not fn:
+                continue
+            results.append({
+                "filename": fn,
+                "size": o.get("size", 0),
+                "download_url": f"/tasks/{task.task_id}/files/{fn}",
             })
         return results
 

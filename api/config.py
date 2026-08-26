@@ -39,6 +39,21 @@ TASK_DB = WORK_DIR / "tasks.json"
 HOST = os.environ.get("LONGCAT_HOST", "0.0.0.0")
 PORT = int(os.environ.get("LONGCAT_PORT", "8000"))
 
+# --- in-process (resident) inference worker ---
+# When enabled (default), the API launches a long-lived torchrun worker at
+# startup that loads the avatar model ONCE and serves avatar-single requests
+# in-process (no per-request cold start). Set LONGCAT_INPROCESS=0 to fall back
+# to the original per-request subprocess dispatch.
+INPROCESS = os.environ.get("LONGCAT_INPROCESS", "1") == "1"
+WORKER_HOST = os.environ.get("LONGCAT_WORKER_HOST", "127.0.0.1")
+WORKER_PORT = int(os.environ.get("LONGCAT_WORKER_PORT", "29500"))
+MODEL_TYPE = os.environ.get("LONGCAT_MODEL_TYPE", "avatar-v1.5")
+AVATAR_MODE = os.environ.get("LONGCAT_AVATAR_MODE", "single")
+USE_INT8 = os.environ.get("LONGCAT_USE_INT8", "0") == "1"
+# populated at runtime by server.lifespan
+WORKER_CLIENT = None
+WORKER_PROC = None
+
 # --- cleanup ---
 # upload files older than this many seconds are purged on start (0 = disabled)
 UPLOAD_TTL_SECONDS = int(os.environ.get("LONGCAT_UPLOAD_TTL_SECONDS", str(24 * 3600)))

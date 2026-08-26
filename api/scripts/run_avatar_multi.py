@@ -22,6 +22,8 @@ from longcat_video.modules.avatar.longcat_video_dit_avatar import LongCatVideoAv
 from longcat_video.modules.quantization import load_quantized_dit
 from longcat_video.context_parallel import context_parallel_util
 
+from api.inference_common import load_avatar_models
+
 import librosa
 import soundfile as sf
 from longcat_video.audio_process import get_audio_encoder, get_audio_feature_extractor
@@ -176,66 +178,20 @@ def generate(args):
     cp_size = context_parallel_util.get_cp_size()
     cp_split_hw = context_parallel_util.get_optimal_split(cp_size)
 
-    # Base video model supplies the shared tokenizer/text_encoder/vae/scheduler.
-    # Default: sibling dir `LongCat-Video` next to the avatar checkpoint. Override with
-    # LONGCAT_CHECKPOINT_DIR_VIDEO to support arbitrary weights layouts.
-    base_model_dir = os.environ.get("LONGCAT_CHECKPOINT_DIR_VIDEO") or os.path.join(checkpoint_dir, "..", "LongCat-Video")
-    tokenizer = AutoTokenizer.from_pretrained(base_model_dir, subfolder="tokenizer", torch_dtype=torch.bfloat16)
-    text_encoder = UMT5EncoderModel.from_pretrained(base_model_dir, subfolder="text_encoder", torch_dtype=torch.bfloat16)
-    vae = AutoencoderKLWan.from_pretrained(base_model_dir, subfolder="vae", torch_dtype=torch.bfloat16)
-    if model_type == "avatar-v1.0":
-        scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(base_model_dir, subfolder="scheduler", torch_dtype=torch.bfloat16)
-    elif model_type == "avatar-v1.5":
-        scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(checkpoint_dir, subfolder="scheduler", torch_dtype=torch.bfloat16)
-    else:
-        raise ValueError(f"Unsupported model_type: {model_type}. Expected 'avatar-v1.0' or 'avatar-v1.5'.")
-
-    if model_type == "avatar-v1.0":
-        dit = LongCatVideoAvatarTransformer3DModel.from_pretrained(checkpoint_dir, subfolder="avatar_multi", cp_split_hw=cp_split_hw, torch_dtype=torch.bfloat16)
-    elif model_type == "avatar-v1.5":
-        if use_int8:
-            print("[INFO] Loading INT8 quantized DiT model...")
-            dit = load_quantized_dit(checkpoint_dir, subfolder="base_model_int8", cp_split_hw=cp_split_hw)
-        else:
-            dit = LongCatVideoAvatarTransformer3DModel.from_pretrained(checkpoint_dir, subfolder="base_model", cp_split_hw=cp_split_hw, torch_dtype=torch.bfloat16)
-        if use_distill:
-            distill_checkpoint_path = os.path.join(checkpoint_dir, "lora", "dmd_lora.safetensors")
-            if os.path.exists(distill_checkpoint_path):
-                dit.load_lora(distill_checkpoint_path, "dmd", multiplier=1.0, lora_network_dim=128, lora_network_alpha=64)
-                dit.enable_loras(["dmd"])
-    else:
-        raise ValueError(f"Unsupported model_type: {model_type}. Expected 'avatar-v1.0' or 'avatar-v1.5'.")
-
-    if model_type == "avatar-v1.0":
-        audio_model_checkpoint_path = os.path.join(checkpoint_dir, "chinese-wav2vec2-base")
-    elif model_type == "avatar-v1.5":
-        audio_model_checkpoint_path = os.path.join(checkpoint_dir, "whisper-large-v3")
-    audio_encoder = get_audio_encoder(audio_model_checkpoint_path, model_type).to(local_rank)
-    audio_feature_extractor = get_audio_feature_extractor(audio_model_checkpoint_path, model_type)
-
-    vocal_separator_path = os.path.join(checkpoint_dir, "vocal_separator/Kim_Vocal_2.onnx")
-    audio_output_dir_temp = Path("./audio_temp_file")
-    os.makedirs(audio_output_dir_temp, exist_ok=True)
-    audio_separator_model_path = os.path.dirname(vocal_separator_path)
-    audio_separator_model_name = os.path.basename(vocal_separator_path)
-    vocal_separator = Separator(
-        output_dir=audio_output_dir_temp / "vocals",
-        output_single_stem="vocals",
-        model_file_dir=audio_separator_model_path,
-    )
-    vocal_separator.load_model(audio_separator_model_name)
-
-    pipe = LongCatVideoAvatarPipeline(
-        tokenizer=tokenizer,
-        text_encoder=text_encoder,
-        vae=vae,
-        scheduler=scheduler,
-        dit=dit,
-        audio_encoder=audio_encoder,
-        audio_feature_extractor=audio_feature_extractor,
+    # Load all avatar models via the shared loader (avatar_mode="multi" selects
+    # the correct DiT subfolder for the v1.0 checkpoint; v1.5 uses base_model).
+    models = load_avatar_models(
+        checkpoint_dir=checkpoint_dir,
         model_type=model_type,
+        use_int8=use_int8,
+        use_distill=use_distill,
+        local_rank=local_rank,
+        cp_split_hw=cp_split_hw,
+        avatar_mode="multi",
     )
-    pipe.to(local_rank)
+    pipe = models["pipe"]
+    vocal_separator = models["vocal_separator"]
+    audio_output_dir_temp = models["audio_output_dir_temp"]
 
     generator = torch.Generator(device=local_rank)
     generator.manual_seed(seed + global_rank)
