@@ -46,10 +46,19 @@ def _section(name: str) -> dict:
 
 
 def _env_or_cfg(section: str, key: str, env_name: str, default):
-    """env var wins; else config.toml; else built-in default."""
-    if env_name and env_name in os.environ:
+    """env var wins; else config.toml; else built-in default.
+
+    An empty string (in env or config.toml) is treated as "unset", so leaving a
+    field blank falls back to the built-in default instead of becoming an empty
+    path/value. (e.g. ``checkpoint_dir_video = ""`` in config.toml -> use the
+    default ``weights/LongCat-Video`` layout, not an empty directory.)
+    """
+    if env_name and env_name in os.environ and str(os.environ[env_name]).strip() != "":
         return os.environ[env_name]
-    return _section(section).get(key, default)
+    val = _section(section).get(key, None)
+    if val is None or str(val).strip() == "":
+        return default
+    return val
 
 
 def _as_bool(v) -> bool:
