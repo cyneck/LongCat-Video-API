@@ -128,6 +128,12 @@ class AvatarSingleRequest(_Avatar40GDefaults):
     num_inference_steps: int = Field(8, ge=1, le=100)
     text_guidance_scale: float = config.LOW_VRAM["text_guidance_scale"]
     audio_guidance_scale: float = config.LOW_VRAM["audio_guidance_scale"]
+    audio_drive_gain: float = Field(
+        0.85,
+        ge=0.5,
+        le=1.2,
+        description="音频驱动 embedding 增益；<1 可抑制夸张嘴型，不改变最终输出音量",
+    )
     ref_img_index: int = 10
     mask_frame_range: int = 3
     model_type: str = Field("avatar-v1.5", pattern="^(avatar-v1.0|avatar-v1.5)$")
@@ -149,6 +155,12 @@ class AvatarMultiRequest(_Avatar40GDefaults):
     num_inference_steps: int = Field(8, ge=1, le=100)
     text_guidance_scale: float = config.LOW_VRAM["text_guidance_scale"]
     audio_guidance_scale: float = config.LOW_VRAM["audio_guidance_scale"]
+    audio_drive_gain: float = Field(
+        0.85,
+        ge=0.5,
+        le=1.2,
+        description="音频驱动 embedding 增益；<1 可抑制夸张嘴型，不改变最终输出音量",
+    )
     ref_img_index: int = 10
     mask_frame_range: int = 3
     model_type: str = Field("avatar-v1.5", pattern="^(avatar-v1.0|avatar-v1.5)$")
