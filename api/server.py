@@ -15,34 +15,34 @@ Auth (CLI flags mirror the LONGCAT_* env vars, CLI takes priority):
     --embed-h5         serve H5 UI + /login page    (LONGCAT_EMBED_H5=1)
 
 Endpoints:
-    GET  /                       health / info
-    POST /files/image            upload an image
-    POST /files/video            upload a video
-    POST /files/audio            upload an audio clip
-    POST /files/json             upload a raw avatar input json (advanced)
-    POST /generate/text-to-video
-    POST /generate/image-to-video
-    POST /generate/video-continuation
-    POST /generate/avatar-single
-    POST /generate/avatar-multi
-    GET  /tasks                  list tasks
-    GET  /tasks/{id}             task status / result
-    GET  /tasks/{id}/files/{fn}  download a produced file
-    GET  /tasks/{id}/log         tail the subprocess log
+    GET    /                       health / info
+    POST   /files/image            upload an image
+    POST   /files/video            upload a video
+    POST   /files/audio            upload an audio clip
+    POST   /files/json             upload a raw avatar input json (advanced)
+    POST   /generate/text-to-video
+    POST   /generate/image-to-video
+    POST   /generate/video-continuation
+    POST   /generate/avatar-single
+    POST   /generate/avatar-multi
+    GET    /tasks                  list tasks
+    GET    /tasks/{id}             task audit/status/result
+    DELETE /tasks/{id}             delete completed/failed task + artifacts/log
+    GET    /tasks/{id}/files/{fn}  download a produced file
+    GET    /tasks/{id}/log         tail the subprocess log
 """
 import os
 import shutil
-import time
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Request, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Form
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import config
 from . import schemas
-from .task_manager import manager, TaskStatus
+from .task_manager import manager
 
 
 app = FastAPI(title="LongCat-Video API", version="0.1.0")
@@ -56,15 +56,7 @@ app.add_middleware(
 
 @app.on_event("startup")
 def _startup_weight_check():
-    """Warn on boot (not crash) when weights are broken, so ops notices a bad
-    layout before the first request hits a torchrun crash.
-
-    - Base video model is required by every task -> a missing dir IS warned.
-    - Avatar revisions are optional per deployment: only the *integrity* of
-      already-downloaded revisions is checked; a not-yet-downloaded revision is
-      skipped silently (the per-request preflight still fails fast with a
-      download hint when someone actually submits that model_type).
-    """
+    """Warn on boot (not crash) when weights are broken, so ops notices a bad layout."""
     import logging
     logger = logging.getLogger("longcat")
     ok_v, pv = config.check_weights(None, None)
@@ -76,9 +68,6 @@ def _startup_weight_check():
             logger.warning("LongCat 权重检查未通过 [%s]:\n%s", mt, "\n".join(problems))
 
 
-# --------------------------------------------------------------------------- #
-# optional: simple login gate + H5 embedding
-# --------------------------------------------------------------------------- #
 @app.middleware("http")
 async def auth_gate(request: Request, call_next):
     """Block every route (except health/login) behind a cookie when AUTH_ENABLED."""
@@ -101,8 +90,6 @@ def _service_info():
         "num_gpus": config.NUM_GPUS,
         "gpu_concurrency": config.GPU_CONCURRENCY,
         "auth": config.AUTH_ENABLED,
-        # 把 A100-40G 安全档的「强制开关」暴露给前端，H5 据此把被强制开启的
-        # INT8 / distill 勾选框置灰并提示「服务器强制」，避免用户以为能关掉。
         "a100_40g_profile": config.LOW_VRAM_PROFILE_ENABLED,
         "force_use_int8": config.LOW_VRAM.get("force_use_int8", False),
         "force_use_distill": config.LOW_VRAM.get("force_use_distill", False),
@@ -111,7 +98,8 @@ def _service_info():
             "/generate/text-to-video", "/generate/image-to-video",
             "/generate/video-continuation", "/generate/avatar-single",
             "/generate/avatar-multi",
-            "/tasks", "/tasks/{id}", "/tasks/{id}/files/{filename}", "/tasks/{id}/log",
+            "/tasks", "/tasks/{id}", "DELETE /tasks/{id}",
+            "/tasks/{id}/files/{filename}", "/tasks/{id}/log",
         ],
     }
 
@@ -121,9 +109,6 @@ def health():
     return _service_info()
 
 
-# --------------------------------------------------------------------------- #
-# helpers
-# --------------------------------------------------------------------------- #
 def _save_upload(upload: UploadFile, allowed: set, subdir: str) -> str:
     ext = Path(upload.filename or "").suffix.lower()
     if ext not in allowed:
@@ -134,7 +119,6 @@ def _save_upload(upload: UploadFile, allowed: set, subdir: str) -> str:
     dest = dest_dir / stored_name
     with open(dest, "wb") as f:
         shutil.copyfileobj(upload.file, f)
-    # return absolute path so subprocess can resolve it from repo root
     return str(dest.resolve())
 
 
@@ -150,19 +134,26 @@ def _resolve_upload_path(p: str) -> str:
     return str(abs_p)
 
 
-def _enqueue(task_type: str, task_input: dict):
-    task = manager.create(task_type, task_input)
+async def _raw_request_params(request: Request, fallback: dict) -> dict:
+    """Return the exact client JSON before Pydantic/profile normalization."""
+    try:
+        payload = await request.json()
+        if isinstance(payload, dict):
+            return payload
+    except Exception:
+        pass
+    return dict(fallback)
+
+
+def _enqueue(task_type: str, task_input: dict, request_params: dict | None = None):
+    task = manager.create(task_type, task_input, request_params=request_params)
     manager.schedule(task)
     return JSONResponse(status_code=202, content={"task_id": task.task_id, "status": task.status.value})
 
 
-# --------------------------------------------------------------------------- #
-# health / info
-# --------------------------------------------------------------------------- #
 @app.get("/")
 def root():
     if config.EMBED_H5 and (config.H5_DIR / "index.html").exists():
-        # no-store：避免浏览器缓存旧 H5 导致「片段数=auto」等前端更新不生效
         return FileResponse(
             str(config.H5_DIR / "index.html"),
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
@@ -192,9 +183,6 @@ def do_login(username: str = Form(...), password: str = Form(...)):
     )
 
 
-# --------------------------------------------------------------------------- #
-# file uploads
-# --------------------------------------------------------------------------- #
 @app.post("/files/image")
 async def upload_image(file: UploadFile = File(...)):
     path = _save_upload(file, config.ALLOWED_IMAGE_EXT, "images")
@@ -215,9 +203,6 @@ async def upload_audio(file: UploadFile = File(...)):
 
 @app.post("/files/json")
 async def upload_json(file: UploadFile = File(...)):
-    """Advanced: upload a pre-built avatar input json and use it directly
-    with the avatar generation endpoints by passing its content via the body.
-    """
     raw = await file.read()
     try:
         import json
@@ -231,63 +216,72 @@ async def upload_json(file: UploadFile = File(...)):
     return {"path": str(dest.resolve()), "filename": dest.name, "preview": data}
 
 
-# --------------------------------------------------------------------------- #
-# generation endpoints
-# --------------------------------------------------------------------------- #
 @app.post("/generate/text-to-video")
-async def gen_t2v(req: schemas.TextToVideoRequest):
-    return _enqueue("text_to_video", req.model_dump())
+async def gen_t2v(request: Request, req: schemas.TextToVideoRequest):
+    normalized = req.model_dump()
+    request_params = await _raw_request_params(request, normalized)
+    return _enqueue("text_to_video", dict(normalized), request_params)
 
 
 @app.post("/generate/image-to-video")
-async def gen_i2v(req: schemas.ImageToVideoRequest):
-    req.cond_image = _resolve_upload_path(req.cond_image)
-    return _enqueue("image_to_video", req.model_dump())
+async def gen_i2v(request: Request, req: schemas.ImageToVideoRequest):
+    normalized = req.model_dump()
+    request_params = await _raw_request_params(request, normalized)
+    execution = dict(normalized)
+    execution["cond_image"] = _resolve_upload_path(execution["cond_image"])
+    return _enqueue("image_to_video", execution, request_params)
 
 
 @app.post("/generate/video-continuation")
-async def gen_vc(req: schemas.VideoContinuationRequest):
-    req.cond_video = _resolve_upload_path(req.cond_video)
-    return _enqueue("video_continuation", req.model_dump())
+async def gen_vc(request: Request, req: schemas.VideoContinuationRequest):
+    normalized = req.model_dump()
+    request_params = await _raw_request_params(request, normalized)
+    execution = dict(normalized)
+    execution["cond_video"] = _resolve_upload_path(execution["cond_video"])
+    return _enqueue("video_continuation", execution, request_params)
 
 
 @app.post("/generate/avatar-single")
-async def gen_avatar_single(req: schemas.AvatarSingleRequest):
-    resolved = {k: _resolve_upload_path(v) for k, v in req.cond_audio.items()}
-    req.cond_audio = resolved
-    if req.cond_image:
-        req.cond_image = _resolve_upload_path(req.cond_image)
-    if req.stage_1 == "ai2v" and not req.cond_image:
+async def gen_avatar_single(request: Request, req: schemas.AvatarSingleRequest):
+    normalized = req.model_dump()
+    request_params = await _raw_request_params(request, normalized)
+    execution = dict(normalized)
+    execution["cond_audio"] = {
+        k: _resolve_upload_path(v) for k, v in normalized["cond_audio"].items()
+    }
+    if normalized.get("cond_image"):
+        execution["cond_image"] = _resolve_upload_path(normalized["cond_image"])
+    if execution["stage_1"] == "ai2v" and not execution.get("cond_image"):
         raise HTTPException(status_code=400, detail="cond_image is required when stage_1='ai2v'")
-    # fail fast: surface a missing/mismatched weight layout before queuing
-    ok, problems = config.check_weights(req.model_type, "avatar_single")
+    ok, problems = config.check_weights(execution["model_type"], "avatar_single")
     if not ok:
         raise HTTPException(
             status_code=400,
             detail="数字人权重未就绪，无法执行:\n" + "\n".join(problems),
         )
-    return _enqueue("avatar_single", req.model_dump())
+    return _enqueue("avatar_single", execution, request_params)
 
 
 @app.post("/generate/avatar-multi")
-async def gen_avatar_multi(req: schemas.AvatarMultiRequest):
-    req.cond_image = _resolve_upload_path(req.cond_image)
-    req.cond_audio = {k: _resolve_upload_path(v) for k, v in req.cond_audio.items()}
-    if not any(req.cond_audio.values()):
+async def gen_avatar_multi(request: Request, req: schemas.AvatarMultiRequest):
+    normalized = req.model_dump()
+    request_params = await _raw_request_params(request, normalized)
+    execution = dict(normalized)
+    execution["cond_image"] = _resolve_upload_path(normalized["cond_image"])
+    execution["cond_audio"] = {
+        k: _resolve_upload_path(v) for k, v in normalized["cond_audio"].items()
+    }
+    if not any(execution["cond_audio"].values()):
         raise HTTPException(status_code=400, detail="at least one of person1/person2 audio is required")
-    # fail fast: surface a missing/mismatched weight layout before queuing
-    ok, problems = config.check_weights(req.model_type, "avatar_multi")
+    ok, problems = config.check_weights(execution["model_type"], "avatar_multi")
     if not ok:
         raise HTTPException(
             status_code=400,
             detail="数字人权重未就绪，无法执行:\n" + "\n".join(problems),
         )
-    return _enqueue("avatar_multi", req.model_dump())
+    return _enqueue("avatar_multi", execution, request_params)
 
 
-# --------------------------------------------------------------------------- #
-# task status / download
-# --------------------------------------------------------------------------- #
 @app.get("/tasks")
 def list_tasks(limit: int = 100):
     return {"tasks": manager.list(limit)}
@@ -301,12 +295,29 @@ def get_task(task_id: str):
     return task.to_dict()
 
 
+@app.delete("/tasks/{task_id}")
+def delete_task(task_id: str):
+    try:
+        task = manager.delete(task_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="task not found")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {
+        "deleted": True,
+        "task_id": task.task_id,
+        "task_type": task.task_type,
+        "status": task.status.value,
+        "deleted_artifacts": True,
+        "uploaded_sources_retained": True,
+    }
+
+
 @app.get("/tasks/{task_id}/files/{filename}")
 def download_task_file(task_id: str, filename: str):
     task = manager.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="task not found")
-    # prevent path traversal
     if "/" in filename or "\\" in filename or ".." in filename:
         raise HTTPException(status_code=400, detail="bad filename")
     fpath = Path(task.output_dir) / filename
@@ -344,9 +355,6 @@ def main():
     p.add_argument("--reload", action="store_true", help="开发模式热重载")
     args = p.parse_args()
 
-    # CLI wins over env: write through to os.environ so a reload worker
-    # (which re-imports config from the environment) inherits the same values,
-    # then re-sync the already-imported config module for the current process.
     if args.auth:
         os.environ["LONGCAT_AUTH"] = "1"
     if args.embed_h5:
@@ -364,7 +372,6 @@ def main():
     config.AUTH_PASS = os.environ.get("LONGCAT_PASS", config.AUTH_PASS)
     config.AUTH_TOKEN = os.environ.get("LONGCAT_AUTH_TOKEN", config.AUTH_TOKEN)
 
-    # fail-closed: refuse to start if auth is on without a real password
     try:
         config.validate_auth()
     except RuntimeError as _e:
