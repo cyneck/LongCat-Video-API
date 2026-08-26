@@ -1,36 +1,4 @@
-"""FastAPI service that wraps the LongCat-Video inference scripts.
-
-Run with:
-    uvicorn api.server:app --host 0.0.0.0 --port 8000
-or
-    python -m api.server                          # env-driven config
-    python -m api.server --auth --user admin --pass 's3cret' --embed-h5
-    python -m api.server --auth --port 9000       # CLI params win over env
-
-Auth (CLI flags mirror the LONGCAT_* env vars, CLI takes priority):
-    --auth             enable the login gate        (LONGCAT_AUTH=1)
-    --user NAME        login account                (LONGCAT_USER)
-    --pass PWD         login password               (LONGCAT_PASS)
-    --token TOK        login cookie token           (LONGCAT_AUTH_TOKEN)
-    --embed-h5         serve H5 UI + /login page    (LONGCAT_EMBED_H5=1)
-
-Endpoints:
-    GET    /                       health / info
-    POST   /files/image            upload an image
-    POST   /files/video            upload a video
-    POST   /files/audio            upload an audio clip
-    POST   /files/json             upload a raw avatar input json (advanced)
-    POST   /generate/text-to-video
-    POST   /generate/image-to-video
-    POST   /generate/video-continuation
-    POST   /generate/avatar-single
-    POST   /generate/avatar-multi
-    GET    /tasks                  list tasks
-    GET    /tasks/{id}             task audit/status/result
-    DELETE /tasks/{id}             delete completed/failed task + artifacts/log
-    GET    /tasks/{id}/files/{fn}  download a produced file
-    GET    /tasks/{id}/log         tail the subprocess log
-"""
+"""FastAPI service that wraps the LongCat-Video inference scripts."""
 import os
 import shutil
 import uuid
@@ -56,7 +24,6 @@ app.add_middleware(
 
 @app.on_event("startup")
 def _startup_weight_check():
-    """Warn on boot (not crash) when weights are broken, so ops notices a bad layout."""
     import logging
     logger = logging.getLogger("longcat")
     ok_v, pv = config.check_weights(None, None)
@@ -70,7 +37,6 @@ def _startup_weight_check():
 
 @app.middleware("http")
 async def auth_gate(request: Request, call_next):
-    """Block every route (except health/login) behind a cookie when AUTH_ENABLED."""
     if not config.AUTH_ENABLED:
         return await call_next(request)
     path = request.url.path
@@ -97,9 +63,9 @@ def _service_info():
             "/files/image", "/files/video", "/files/audio", "/files/json",
             "/generate/text-to-video", "/generate/image-to-video",
             "/generate/video-continuation", "/generate/avatar-single",
-            "/generate/avatar-multi",
-            "/tasks", "/tasks/{id}", "DELETE /tasks/{id}",
-            "/tasks/{id}/files/{filename}", "/tasks/{id}/log",
+            "/generate/avatar-multi", "/tasks", "/tasks/{id}",
+            "DELETE /tasks/{id}", "/tasks/{id}/files/{filename}",
+            "/tasks/{id}/log",
         ],
     }
 
@@ -123,7 +89,6 @@ def _save_upload(upload: UploadFile, allowed: set, subdir: str) -> str:
 
 
 def _resolve_upload_path(p: str) -> str:
-    """Validate that a referenced upload path lives under the upload dir."""
     abs_p = Path(p).resolve()
     try:
         abs_p.relative_to(config.UPLOAD_DIR.resolve())
@@ -135,7 +100,6 @@ def _resolve_upload_path(p: str) -> str:
 
 
 async def _raw_request_params(request: Request, fallback: dict) -> dict:
-    """Return the exact client JSON before Pydantic/profile normalization."""
     try:
         payload = await request.json()
         if isinstance(payload, dict):
@@ -153,12 +117,29 @@ def _enqueue(task_type: str, task_input: dict, request_params: dict | None = Non
 
 @app.get("/")
 def root():
-    if config.EMBED_H5 and (config.H5_DIR / "index.html").exists():
-        return FileResponse(
-            str(config.H5_DIR / "index.html"),
+    index_path = config.H5_DIR / "index.html"
+    progress_path = config.H5_DIR / "progress.js"
+    if config.EMBED_H5 and index_path.exists():
+        html = index_path.read_text(encoding="utf-8")
+        if progress_path.exists() and "/h5/progress.js" not in html:
+            html = html.replace("</body>", '<script src="/h5/progress.js"></script>\n</body>')
+        return HTMLResponse(
+            html,
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
         )
     return _service_info()
+
+
+@app.get("/h5/progress.js")
+def h5_progress_script():
+    path = config.H5_DIR / "progress.js"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="progress renderer not found")
+    return FileResponse(
+        str(path),
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
 
 
 @app.get("/login")
@@ -172,10 +153,7 @@ def login_page():
 def do_login(username: str = Form(...), password: str = Form(...)):
     if username == config.AUTH_USER and password == config.AUTH_PASS:
         resp = RedirectResponse("/", status_code=303)
-        resp.set_cookie(
-            "lc_token", config.AUTH_TOKEN,
-            httponly=True, samesite="lax", max_age=60 * 60 * 24 * 7,
-        )
+        resp.set_cookie("lc_token", config.AUTH_TOKEN, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 7)
         return resp
     return HTMLResponse(
         "<p style='color:#e54848'>账号或密码错误</p><p><a href='/login'>返回重试</a></p>",
@@ -246,19 +224,14 @@ async def gen_avatar_single(request: Request, req: schemas.AvatarSingleRequest):
     normalized = req.model_dump()
     request_params = await _raw_request_params(request, normalized)
     execution = dict(normalized)
-    execution["cond_audio"] = {
-        k: _resolve_upload_path(v) for k, v in normalized["cond_audio"].items()
-    }
+    execution["cond_audio"] = {k: _resolve_upload_path(v) for k, v in normalized["cond_audio"].items()}
     if normalized.get("cond_image"):
         execution["cond_image"] = _resolve_upload_path(normalized["cond_image"])
     if execution["stage_1"] == "ai2v" and not execution.get("cond_image"):
         raise HTTPException(status_code=400, detail="cond_image is required when stage_1='ai2v'")
     ok, problems = config.check_weights(execution["model_type"], "avatar_single")
     if not ok:
-        raise HTTPException(
-            status_code=400,
-            detail="数字人权重未就绪，无法执行:\n" + "\n".join(problems),
-        )
+        raise HTTPException(status_code=400, detail="数字人权重未就绪，无法执行:\n" + "\n".join(problems))
     return _enqueue("avatar_single", execution, request_params)
 
 
@@ -268,17 +241,12 @@ async def gen_avatar_multi(request: Request, req: schemas.AvatarMultiRequest):
     request_params = await _raw_request_params(request, normalized)
     execution = dict(normalized)
     execution["cond_image"] = _resolve_upload_path(normalized["cond_image"])
-    execution["cond_audio"] = {
-        k: _resolve_upload_path(v) for k, v in normalized["cond_audio"].items()
-    }
+    execution["cond_audio"] = {k: _resolve_upload_path(v) for k, v in normalized["cond_audio"].items()}
     if not any(execution["cond_audio"].values()):
         raise HTTPException(status_code=400, detail="at least one of person1/person2 audio is required")
     ok, problems = config.check_weights(execution["model_type"], "avatar_multi")
     if not ok:
-        raise HTTPException(
-            status_code=400,
-            detail="数字人权重未就绪，无法执行:\n" + "\n".join(problems),
-        )
+        raise HTTPException(status_code=400, detail="数字人权重未就绪，无法执行:\n" + "\n".join(problems))
     return _enqueue("avatar_multi", execution, request_params)
 
 
@@ -374,9 +342,9 @@ def main():
 
     try:
         config.validate_auth()
-    except RuntimeError as _e:
+    except RuntimeError as exc:
         import sys
-        print(f"[longcat][auth] 启动失败: {_e}", file=sys.stderr, flush=True)
+        print(f"[longcat][auth] 启动失败: {exc}", file=sys.stderr, flush=True)
         sys.exit(2)
 
     if config.AUTH_ENABLED:
