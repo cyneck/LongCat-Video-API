@@ -277,6 +277,9 @@ def generate(args):
     num_inference_steps = int(input_data.get("num_inference_steps", 50))
     text_guidance_scale = float(input_data.get("text_guidance_scale", 4.0))
     audio_guidance_scale = float(input_data.get("audio_guidance_scale", 4.0))
+    audio_drive_gain = float(input_data.get("audio_drive_gain", 0.85))
+    if not 0.5 <= audio_drive_gain <= 1.2:
+        raise ValueError(f"audio_drive_gain must be in [0.5, 1.2], got {audio_drive_gain}")
     ref_img_index = int(input_data.get("ref_img_index", 10))
     mask_frame_range = int(input_data.get("mask_frame_range", 3))
     model_type = input_data.get("model_type", "avatar-v1.0")
@@ -443,8 +446,7 @@ def generate(args):
     if global_rank == 0:
         print(
             f"[longcat][auto] multi audio_type={audio_type} left={left_duration:.2f}s right={right_duration:.2f}s "
-            f"source={source_duration:.2f}s frame_plan={frame_plan} "
-            f"output={generated_frames}f/{generate_duration:.2f}s",
+            f"source={source_duration:.2f}s frame_plan={frame_plan} output={generated_frames}f/{generate_duration:.2f}s",
             flush=True,
         )
 
@@ -465,12 +467,8 @@ def generate(args):
         separation_started = time.perf_counter()
         left_temp = os.path.join(audio_output_dir_temp, f"{generate_random_uid()}_left.wav")
         right_temp = os.path.join(audio_output_dir_temp, f"{generate_random_uid()}_right.wav")
-        left_temp = extract_vocal_from_speech(
-            left_raw_speech_path, left_temp, vocal_separator, audio_output_dir_temp
-        )
-        right_temp = extract_vocal_from_speech(
-            right_raw_speech_path, right_temp, vocal_separator, audio_output_dir_temp
-        )
+        left_temp = extract_vocal_from_speech(left_raw_speech_path, left_temp, vocal_separator, audio_output_dir_temp)
+        right_temp = extract_vocal_from_speech(right_raw_speech_path, right_temp, vocal_separator, audio_output_dir_temp)
         timings["vocal_separation"] = _log_timing("vocal_separation", separation_started, global_rank)
 
         audio_started = time.perf_counter()
@@ -489,16 +487,21 @@ def generate(args):
         left_full_audio_emb = pipe.get_audio_embedding(
             left_drive, fps=save_fps * audio_stride, device=local_rank,
             sample_rate=16000, model_type=model_type
-        ).detach().cpu()
+        ).detach().cpu() * audio_drive_gain
         right_full_audio_emb = pipe.get_audio_embedding(
             right_drive, fps=save_fps * audio_stride, device=local_rank,
             sample_rate=16000, model_type=model_type
-        ).detach().cpu()
+        ).detach().cpu() * audio_drive_gain
         if use_background_silent_audio:
             back_full_audio_emb = pipe.get_audio_embedding(
                 np.zeros_like(left_drive), fps=save_fps * audio_stride, device=local_rank,
                 sample_rate=16000, model_type=model_type
             ).detach().cpu()
+        print(
+            f"[longcat][audio] audio_drive_gain={audio_drive_gain:.2f} applied to speaker embeddings "
+            "(background silence/output audio unchanged)",
+            flush=True,
+        )
         if torch.isnan(left_full_audio_emb).any() or torch.isnan(right_full_audio_emb).any():
             raise ValueError("broken audio embedding with nan values")
         timings["audio_embedding"] = _log_timing("audio_embedding", audio_started, global_rank)
@@ -602,33 +605,23 @@ def generate(args):
     if cp_rank == 0:
         seg_path = os.path.join(output_dir, "segment_1")
         save_video_ffmpeg(
-            torch.from_numpy(np.array(video)),
-            seg_path,
-            audio_path=None,
-            fps=save_fps,
-            quality=5,
+            torch.from_numpy(np.array(video)), seg_path, audio_path=None, fps=save_fps, quality=5
         )
         segment_paths.append(seg_path + ".mp4")
     timings["segment_1"] = _log_timing("segment_1", segment_started, global_rank)
     _log_memory("after_segment_1", global_rank)
 
-    # 480p/720p are bucket classes, not fixed WxH. AI2V selects the actual
-    # bucket from the source aspect ratio, so AVC must continue at the exact
-    # spatial size produced by segment 1. Using the nominal 480x832 here makes
-    # portrait/square inputs fail when cond_latents are copied into target latents.
     actual_width, actual_height = video[0].size
     latent_height = int(latent.shape[-2] * pipe.vae_scale_factor_spatial)
     latent_width = int(latent.shape[-1] * pipe.vae_scale_factor_spatial)
     if (actual_height, actual_width) != (latent_height, latent_width):
         raise RuntimeError(
-            f"AI2V output/latent spatial mismatch: video={actual_width}x{actual_height}, "
-            f"latent-derived={latent_width}x{latent_height}"
+            f"AI2V output/latent spatial mismatch: video={actual_width}x{actual_height}, latent-derived={latent_width}x{latent_height}"
         )
     height, width = actual_height, actual_width
     if global_rank == 0:
         print(
-            f"[longcat][shape] continuation size={width}x{height}, "
-            f"latent={latent.shape[-1]}x{latent.shape[-2]}",
+            f"[longcat][shape] continuation size={width}x{height}, latent={latent.shape[-1]}x{latent.shape[-2]}",
             flush=True,
         )
 
@@ -647,10 +640,7 @@ def generate(args):
         audio_embs, _ = build_audio_window(audio_start_idx, current_frames)
 
         if global_rank == 0:
-            print(
-                f"Generating segment {segment_idx + 1}/{num_segments} ({current_frames} frames)...",
-                flush=True,
-            )
+            print(f"Generating segment {segment_idx + 1}/{num_segments} ({current_frames} frames)...", flush=True)
         segment_started = time.perf_counter()
         output, latent = pipe.generate_avc(
             video=current_video,
@@ -677,33 +667,23 @@ def generate(args):
             use_distill=use_distill,
         )
         output = output[0]
-        new_video = [
-            PIL.Image.fromarray((output[i] * 255).astype(np.uint8))
-            for i in range(output.shape[0])
-        ]
+        new_video = [PIL.Image.fromarray((output[i] * 255).astype(np.uint8)) for i in range(output.shape[0])]
         del output, audio_embs
 
         new_frames = new_video[num_cond_frames:]
         if not new_frames:
             raise RuntimeError(
-                f"Continuation segment {segment_idx + 1} produced no new frames "
-                f"after trimming {num_cond_frames} conditioning frames"
+                f"Continuation segment {segment_idx + 1} produced no new frames after trimming {num_cond_frames} conditioning frames"
             )
         if cp_rank == 0:
             seg_path = os.path.join(output_dir, f"segment_{segment_idx + 1}")
             save_video_ffmpeg(
-                torch.from_numpy(np.array(new_frames)),
-                seg_path,
-                audio_path=None,
-                fps=save_fps,
-                quality=5,
+                torch.from_numpy(np.array(new_frames)), seg_path, audio_path=None, fps=save_fps, quality=5
             )
             segment_paths.append(seg_path + ".mp4")
 
         current_video = new_video
-        timings[f"segment_{segment_idx + 1}"] = _log_timing(
-            f"segment_{segment_idx + 1}", segment_started, global_rank
-        )
+        timings[f"segment_{segment_idx + 1}"] = _log_timing(f"segment_{segment_idx + 1}", segment_started, global_rank)
         torch_gc()
         gc.collect()
         _log_memory(f"after_segment_{segment_idx + 1}", global_rank)
