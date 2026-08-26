@@ -7,3 +7,6 @@ __pycache__/
 /api_work/
 /.idea/
 /.workbuddy/
+# 全局配置文件（含真实密码/token，禁止入库；模板见 config.toml.example）
+config.toml
+config.local.toml
