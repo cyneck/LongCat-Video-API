@@ -373,6 +373,28 @@ apt-get install -y libsndfile1 ffmpeg
 **Q7. GPU 不可用（`torch.cuda.is_available()` 为 False）**
 检查驱动 / CUDA；容器需带 `--gpus all` 或对应 device 映射；确认 `nvidia-smi` 能看到卡。
 
+**Q8. 模型加载阶段进程被 SIGKILL（`exitcode: -9`）/ OOM**
+现象：权重分片加载到一半或「Loading INT8 quantized DiT model...」时整个 torchrun 子进程被系统杀掉（日志里有 `Signal 9 (SIGKILL)`）。这是**内存耗尽被 OOM killer 强杀**，不是代码 bug。
+
+最常见诱因：环境里**没有 `accelerate`**。transformers 在缺少 `accelerate` 时会退回 `low_cpu_mem_usage=False`，把权重全量先搬进 CPU 内存再初始化，峰值内存暴涨 2~4 倍，加载 13.6B 模型时直接撑爆宿主机 RAM。日志里通常会先打印：
+```
+Cannot initialize model with low cpu memory usage because `accelerate` was not found ... Defaulting to `low_cpu_mem_usage=False`.
+```
+修复：
+```bash
+# 1) 装 accelerate（已加入 requirements.txt，直接重装整份即可；也可单独装）
+/opt/conda/bin/python3.12 -m pip install -r requirements.txt
+# 或单独：/opt/conda/bin/python3.12 -m pip install accelerate==0.30.1
+
+# 2) 确认 low_cpu_mem_usage 已生效（不再出现上面的警告即代表 ok）
+/opt/conda/bin/python3.12 -c "import accelerate; print('accelerate', accelerate.__version__)"
+
+# 3) 看宿主机内存余量，确认不是被别的进程挤爆
+free -h
+```
+> 装好 `accelerate` 后 `low_cpu_mem_usage=True`，加载峰值内存大幅下降，多数情况即可过加载关。
+> 若装了 `accelerate` 仍 `-9`：说明宿主机 **RAM 本身不够**（容器常有限内存上限）。检查 `free -h` 可用内存；关掉同机其他大进程，或给容器调大内存上限。若 RAM 充足但仍杀，再看是否 **VRAM 不够**：`nvidia-smi` 看显存，INT8 已省显存，但仍可能不够时可调大 `LONGCAT_NUM_GPUS`（上下文并行把模型/激活摊到多卡），或确认 `LONGCAT_USE_INT8=1`。
+
 ---
 
 ## 9. 目录与产物
