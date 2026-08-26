@@ -28,6 +28,19 @@ python --version
 
 ---
 
+## 0.5 一键配置模板（推荐）
+
+仓库根目录提供了 `.env.example`，把生产推荐值（INT8 量化、常驻 Worker、显式权重路径、8080 端口）都写好了。部署时：
+
+```bash
+cp .env.example .env          # 然后按服务器实际改 LONGCAT_CHECKPOINT_DIR_VIDEO / _AVATAR / LONGCAT_PORT
+./start.sh                    # 自动 source .env 并注入 PYTHONPATH，拉起 uvicorn
+```
+
+`config.py` 也会尝试用 `python-dotenv` 自动加载 `.env`；若未装 `python-dotenv`，用 `start.sh` 或在 shell / systemd 里 `export` 等价变量即可。`.env`（含真实路径/密码）已加入 `.gitignore`，请勿提交。
+
+---
+
 ## 1. 安装依赖（已修正坑版）
 
 仓库里有三个依赖文件，分工如下：

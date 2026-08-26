@@ -6,3 +6,6 @@ __pycache__/
 /.venv/
 /api_work/
 /.idea/
+# 本地环境变量（含真实路径/密码），不要把 .env 提交进仓库
+.env
+.env.local

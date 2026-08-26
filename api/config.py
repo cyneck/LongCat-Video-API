@@ -6,6 +6,14 @@ LONGCAT_NUM_GPUS, LONGCAT_WORK_DIR, LONGCAT_HOST, LONGCAT_PORT).
 import os
 from pathlib import Path
 
+# Auto-load a local .env if python-dotenv is available. No-op otherwise, so the
+# service also works when variables are exported directly in the shell / systemd.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
 
 # --- repository layout ---
 REPO_ROOT = Path(__file__).resolve().parent.parent

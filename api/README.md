@@ -52,13 +52,17 @@
 # 1. 安装（在已装好 requirements.txt / requirements_avatar.txt 的环境基础上）
 pip install -r requirements_api.txt
 
-# 2. 配置（可选，按需用环境变量覆盖默认值）
+# 2. 配置：复制模板，按服务器实际修改路径 / 端口
+cp .env.example .env
+#   重点：LONGCAT_CHECKPOINT_DIR_VIDEO / _AVATAR 用绝对路径，避免 ../LongCat-Video 回退失效
+#   也可直接 export 覆盖（与 .env 等效）：
 export LONGCAT_NUM_GPUS=2
 export LONGCAT_CHECKPOINT_DIR_VIDEO=./weights/LongCat-Video
 export LONGCAT_CHECKPOINT_DIR_AVATAR=./weights/LongCat-Video-Avatar-1.5
 
-# 3. 启动
-uvicorn api.server:app --host 0.0.0.0 --port 8000
+# 3. 启动（start.sh 会自动 source .env 并注入 PYTHONPATH）
+./start.sh
+# 或：uvicorn api.server:app --host 0.0.0.0 --port 8000
 # 或：python -m api.server
 ```
 
