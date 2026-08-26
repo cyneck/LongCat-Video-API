@@ -4,12 +4,19 @@ All material inputs (image / video / audio) are passed as paths returned by
 the /files/upload endpoints — we keep heavy binary data out of the JSON body
 and avoid re-uploading on retries.
 
-Avatar v1.5 defaults intentionally target a single 40 GB Ampere GPU: INT8 DiT,
-8-step distilled inference, one segment and 480p. Callers can explicitly
-opt out when running on larger/multi-GPU systems.
+The default avatar-v1.5 runtime profile targets one A100 40GB GPU. While
+LONGCAT_A100_40G_PROFILE=1 (the default), v1.5 requests are normalized to the
+INT8 + 8-step distilled path even if an older client/H5 explicitly sends the
+legacy high-memory values. Set LONGCAT_A100_40G_PROFILE=0 on larger systems to
+restore caller-controlled tuning.
 """
+import os
 from typing import Optional, Dict, List
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+
+def _a100_40g_profile_enabled() -> bool:
+    return os.environ.get("LONGCAT_A100_40G_PROFILE", "1") == "1"
 
 
 class TextToVideoRequest(BaseModel):
@@ -49,7 +56,23 @@ class VideoContinuationRequest(BaseModel):
     seed: int = 42
 
 
-class AvatarSingleRequest(BaseModel):
+class _Avatar40GDefaults(BaseModel):
+    """Shared normalization for the single-A100 production profile."""
+
+    @model_validator(mode="after")
+    def apply_a100_40g_profile(self):
+        if _a100_40g_profile_enabled() and self.model_type == "avatar-v1.5":
+            self.resolution = "480p"
+            self.num_segments = 1
+            self.num_inference_steps = 8
+            self.text_guidance_scale = 1.0
+            self.audio_guidance_scale = 1.0
+            self.use_distill = True
+            self.use_int8 = True
+        return self
+
+
+class AvatarSingleRequest(_Avatar40GDefaults):
     prompt: str
     cond_audio: Dict[str, str] = Field(..., description='{"person1": "<audio upload path>"}')
     cond_image: Optional[str] = Field(None, description="required when stage_1='ai2v'")
@@ -67,7 +90,7 @@ class AvatarSingleRequest(BaseModel):
     seed: int = 42
 
 
-class AvatarMultiRequest(BaseModel):
+class AvatarMultiRequest(_Avatar40GDefaults):
     prompt: str
     cond_image: str = Field(..., description="upload path from /files/image")
     cond_audio: Dict[str, str] = Field(
