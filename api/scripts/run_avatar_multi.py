@@ -199,7 +199,6 @@ def audio_prepare_multi(
     sample_rate=16000,
     audio_type="para",
 ):
-    """Prepare two drive tracks and one final mixed track without quadratic copies."""
     left_vocal = _load_audio_or_none(left_temp_vocal_path, sample_rate)
     right_vocal = _load_audio_or_none(right_temp_vocal_path, sample_rate)
     left_raw = _load_audio_or_none(left_raw_speech_path, sample_rate)
@@ -612,6 +611,26 @@ def generate(args):
         segment_paths.append(seg_path + ".mp4")
     timings["segment_1"] = _log_timing("segment_1", segment_started, global_rank)
     _log_memory("after_segment_1", global_rank)
+
+    # 480p/720p are bucket classes, not fixed WxH. AI2V selects the actual
+    # bucket from the source aspect ratio, so AVC must continue at the exact
+    # spatial size produced by segment 1. Using the nominal 480x832 here makes
+    # portrait/square inputs fail when cond_latents are copied into target latents.
+    actual_width, actual_height = video[0].size
+    latent_height = int(latent.shape[-2] * pipe.vae_scale_factor_spatial)
+    latent_width = int(latent.shape[-1] * pipe.vae_scale_factor_spatial)
+    if (actual_height, actual_width) != (latent_height, latent_width):
+        raise RuntimeError(
+            f"AI2V output/latent spatial mismatch: video={actual_width}x{actual_height}, "
+            f"latent-derived={latent_width}x{latent_height}"
+        )
+    height, width = actual_height, actual_width
+    if global_rank == 0:
+        print(
+            f"[longcat][shape] continuation size={width}x{height}, "
+            f"latent={latent.shape[-1]}x{latent.shape[-2]}",
+            flush=True,
+        )
 
     if cp_size == 1 and prompt_cache:
         pipe.text_encoder = None
