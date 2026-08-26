@@ -9,6 +9,9 @@ import PIL.Image
 import numpy as np
 from pathlib import Path
 
+# Avoid tokenizers' fork warning when ffmpeg is spawned after prompt tokenization.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 import torch
 import torch.distributed as dist
 
@@ -46,6 +49,69 @@ DEFAULT_NEGATIVE_PROMPT = (
 def torch_gc():
     torch.cuda.empty_cache()
     torch.cuda.ipc_collect()
+
+
+def _round_up_vae_frames(frame_count: int, max_frames: int = 93) -> int:
+    """Round up to the VAE temporal constraint: (frames - 1) % 4 == 0."""
+    frame_count = max(1, min(int(frame_count), max_frames))
+    rounded = 1 + math.ceil((frame_count - 1) / 4) * 4
+    return min(max_frames, rounded)
+
+
+def _auto_frame_plan(duration: float, fps: int, max_frames: int, cond_frames: int) -> list[int]:
+    """Plan only the frames needed to cover the source audio.
+
+    Full 93-frame clips are retained for all intermediate segments. Only a
+    short single segment or the final continuation is reduced, so the long-video
+    conditioning topology remains unchanged while avoiding useless denoising.
+    """
+    target_frames = max(1, math.ceil(duration * fps))
+    if target_frames <= max_frames:
+        return [_round_up_vae_frames(target_frames, max_frames)]
+
+    plan = [max_frames]
+    covered = max_frames
+    max_new_frames = max_frames - cond_frames
+    while covered < target_frames:
+        remaining = target_frames - covered
+        new_frames = min(max_new_frames, remaining)
+        segment_frames = _round_up_vae_frames(cond_frames + new_frames, max_frames)
+        # Continuations must contain at least one VAE temporal block of new frames.
+        segment_frames = max(segment_frames, cond_frames + 4)
+        segment_frames = _round_up_vae_frames(segment_frames, max_frames)
+        plan.append(segment_frames)
+        covered += segment_frames - cond_frames
+    return plan
+
+
+def _generated_frame_count(frame_plan: list[int], cond_frames: int) -> int:
+    if not frame_plan:
+        return 0
+    return frame_plan[0] + sum(frames - cond_frames for frames in frame_plan[1:])
+
+
+def _log_timing(name: str, started_at: float, rank: int = 0) -> float:
+    elapsed = time.perf_counter() - started_at
+    if rank == 0:
+        print(f"[longcat][timing] {name}={elapsed:.2f}s", flush=True)
+    return elapsed
+
+
+def _log_onnx_provider_status(rank: int = 0):
+    if rank != 0:
+        return
+    try:
+        import onnxruntime as ort
+        providers = ort.get_available_providers()
+        print(f"[longcat][onnx] providers={providers}", flush=True)
+        if "CUDAExecutionProvider" not in providers:
+            print(
+                "[longcat][onnx] CUDAExecutionProvider 不可用，vocal separator 将使用 CPU；"
+                "若部署环境兼容，可安装匹配 CUDA 的 onnxruntime-gpu 以缩短音频预处理时间",
+                flush=True,
+            )
+    except Exception as exc:
+        print(f"[longcat][onnx] provider detection failed: {exc}", flush=True)
 
 
 def _concat_and_mux(segment_paths, output_base, audio_path):
@@ -101,6 +167,9 @@ def extract_vocal_from_speech(source_path, target_path, vocal_separator, audio_o
 
 
 def generate(args):
+    total_started = time.perf_counter()
+    timings = {}
+
     with open(args.task_input, "r", encoding="utf-8") as f:
         cfg = json.load(f)
 
@@ -138,7 +207,7 @@ def generate(args):
     if model_type == "avatar-v1.5":
         save_fps = 25
         audio_stride = 1
-    num_frames = 93
+    max_num_frames = 93
     num_cond_frames = 13
 
     if resolution == "480p":
@@ -161,6 +230,7 @@ def generate(args):
     cp_size = context_parallel_util.get_cp_size()
     cp_split_hw = context_parallel_util.get_optimal_split(cp_size)
 
+    model_started = time.perf_counter()
     _fallback = os.path.normpath(os.path.join(checkpoint_dir, "..", "LongCat-Video"))
     base_model_dir = os.environ.get("LONGCAT_CHECKPOINT_DIR_VIDEO") or _fallback
     tokenizer = AutoTokenizer.from_pretrained(base_model_dir, subfolder="tokenizer", torch_dtype=torch.bfloat16)
@@ -201,12 +271,15 @@ def generate(args):
     os.makedirs(audio_output_dir_temp, exist_ok=True)
     audio_separator_model_path = os.path.dirname(vocal_separator_path)
     audio_separator_model_name = os.path.basename(vocal_separator_path)
+    _log_onnx_provider_status(global_rank)
+    separator_init_started = time.perf_counter()
     vocal_separator = Separator(
         output_dir=audio_output_dir_temp / "vocals",
         output_single_stem="vocals",
         model_file_dir=audio_separator_model_path,
     )
     vocal_separator.load_model(audio_separator_model_name)
+    timings["separator_init"] = _log_timing("separator_init", separator_init_started, global_rank)
 
     pipe = LongCatVideoAvatarPipeline(
         tokenizer=tokenizer,
@@ -219,6 +292,7 @@ def generate(args):
         model_type=model_type,
     )
     pipe.to(local_rank)
+    timings["model_load"] = _log_timing("model_load", model_started, global_rank)
 
     # The pipeline offloads UMT5 to CPU after the first prompt encoding to free
     # several GB of VRAM. Continuation segments use the same prompt, so calling
@@ -255,6 +329,7 @@ def generate(args):
     generator = torch.Generator(device=local_rank)
     generator.manual_seed(seed + global_rank)
 
+    frame_plan = [max_num_frames]
     if cp_rank == 0:
         # The output duration must follow the ORIGINAL uploaded audio, not the
         # separator result. Separation is only an embedding-preprocessing step.
@@ -262,46 +337,47 @@ def generate(args):
         if not math.isfinite(raw_duration) or raw_duration <= 0:
             raise ValueError(f"Invalid input audio duration: {raw_duration}")
 
+        separation_started = time.perf_counter()
         temp_vocal_path = extract_vocal_from_speech(
             raw_speech_path,
             f"/tmp/temp_speech_{generate_random_uid()}_{global_rank}_vocal.wav",
             vocal_separator,
             audio_output_dir_temp,
         )
+        timings["vocal_separation"] = _log_timing("vocal_separation", separation_started, global_rank)
         assert temp_vocal_path is not None and os.path.exists(temp_vocal_path), "No vocal detected"
 
         speech_array, sr = librosa.load(temp_vocal_path, sr=16000)
         vocal_duration = len(speech_array) / sr
 
         if isinstance(num_segments_raw, str) and num_segments_raw.strip().lower() == "auto":
-            first_seg_dur = num_frames / save_fps
-            seg_advance = (num_frames - num_cond_frames) / save_fps
-            if raw_duration <= first_seg_dur:
-                num_segments = 1
-            else:
-                num_segments = 1 + math.ceil((raw_duration - first_seg_dur) / seg_advance)
+            frame_plan = _auto_frame_plan(raw_duration, save_fps, max_num_frames, num_cond_frames)
             _max_seg = config.LOW_VRAM.get("max_num_segments", 0)
-            if _max_seg and _max_seg > 0 and num_segments > _max_seg:
+            if _max_seg and _max_seg > 0 and len(frame_plan) > _max_seg:
                 print(
-                    f"[longcat][auto] 计算得到 {num_segments} 段，但 profile max_num_segments={_max_seg}，"
+                    f"[longcat][auto] 计算得到 {len(frame_plan)} 段，但 profile max_num_segments={_max_seg}，"
                     f"将封顶为 {_max_seg}；若希望完整覆盖音频，请将 max_num_segments 设为 0",
                     flush=True,
                 )
-                num_segments = _max_seg
+                frame_plan = frame_plan[:_max_seg]
+            num_segments = len(frame_plan)
+            generated_frames = _generated_frame_count(frame_plan, num_cond_frames)
             print(
                 f"[longcat][auto] 原始音频 {raw_duration:.2f}s（分离后人声 {vocal_duration:.2f}s）"
-                f" → {num_segments} 段；首段 {first_seg_dur:.2f}s，后续每段新增 {seg_advance:.2f}s",
+                f" → frame_plan={frame_plan}，有效输出 {generated_frames} 帧/{generated_frames/save_fps:.2f}s",
                 flush=True,
             )
         else:
             num_segments = max(1, int(num_segments_raw))
-            print(f"[longcat][seg] 使用固定段数 num_segments={num_segments}", flush=True)
+            frame_plan = [max_num_frames] * num_segments
+            print(f"[longcat][seg] 使用固定段数 num_segments={num_segments}，frame_plan={frame_plan}", flush=True)
 
-        generate_duration = num_frames / save_fps + (num_segments - 1) * (num_frames - num_cond_frames) / save_fps
+        generate_duration = _generated_frame_count(frame_plan, num_cond_frames) / save_fps
         added_sample_nums = math.ceil((generate_duration - vocal_duration) * sr)
         if added_sample_nums > 0:
             speech_array = np.append(speech_array, np.zeros(added_sample_nums, dtype=speech_array.dtype))
 
+        audio_embedding_started = time.perf_counter()
         full_audio_emb = pipe.get_audio_embedding(
             speech_array,
             fps=save_fps * audio_stride,
@@ -309,6 +385,7 @@ def generate(args):
             sample_rate=sr,
             model_type=model_type,
         )
+        timings["audio_embedding"] = _log_timing("audio_embedding", audio_embedding_started, global_rank)
         if torch.isnan(full_audio_emb).any():
             raise ValueError("broken audio embedding with nan values")
 
@@ -328,19 +405,27 @@ def generate(args):
         full_audio_emb = torch.zeros(*full_audio_emb_shape_list, dtype=torch.float32, device=local_rank)
         context_parallel_util.cp_broadcast(full_audio_emb)
 
+    # Current API profile uses one GPU (cp_size=1). Keep the existing multi-GPU
+    # behavior unchanged; dynamic frame planning is applied by rank 0.
+    if cp_rank != 0:
+        num_segments = max(1, int(num_segments_raw)) if not isinstance(num_segments_raw, str) else 1
+        frame_plan = [max_num_frames] * num_segments
+
     pipe.audio_encoder = pipe.audio_encoder.to("cpu")
     torch.cuda.empty_cache()
 
     indices = torch.arange(2 * 2 + 1) - 2
     audio_start_idx = 0
-    audio_end_idx = audio_start_idx + audio_stride * num_frames
+    first_num_frames = frame_plan[0]
+    audio_end_idx = audio_start_idx + audio_stride * first_num_frames
 
     center_indices = torch.arange(audio_start_idx, audio_end_idx, audio_stride).unsqueeze(1) + indices.unsqueeze(0)
     center_indices = torch.clamp(center_indices, min=0, max=full_audio_emb.shape[0] - 1)
     audio_emb = full_audio_emb[center_indices][None, ...].to(local_rank)
 
     if local_rank == 0:
-        print(f"Generating segment 1/{num_segments}...")
+        print(f"Generating segment 1/{num_segments} ({first_num_frames} frames)...")
+    segment_started = time.perf_counter()
 
     if stage_1 == "at2v":
         output_tuple = pipe.generate_at2v(
@@ -348,7 +433,7 @@ def generate(args):
             negative_prompt=negative_prompt,
             height=height,
             width=width,
-            num_frames=num_frames,
+            num_frames=first_num_frames,
             num_inference_steps=num_inference_steps,
             text_guidance_scale=text_guidance_scale,
             audio_guidance_scale=audio_guidance_scale,
@@ -376,7 +461,7 @@ def generate(args):
             prompt=prompt,
             negative_prompt=negative_prompt,
             resolution=resolution,
-            num_frames=num_frames,
+            num_frames=first_num_frames,
             num_inference_steps=num_inference_steps,
             text_guidance_scale=text_guidance_scale,
             audio_guidance_scale=audio_guidance_scale,
@@ -399,6 +484,8 @@ def generate(args):
     else:
         raise NotImplementedError(f"Not supported type of stage_1: {stage_1}")
 
+    timings["segment_1"] = _log_timing("segment_1", segment_started, global_rank)
+
     if context_parallel_util.get_cp_size() > 1:
         torch.distributed.barrier(group=context_parallel_util.get_cp_group())
 
@@ -407,15 +494,18 @@ def generate(args):
     ref_latent = latent[:, :, :1].clone()
 
     for segment_idx in range(1, num_segments):
+        current_num_frames = frame_plan[segment_idx]
+        previous_num_frames = frame_plan[segment_idx - 1]
         if local_rank == 0:
-            print(f"Generating segment {segment_idx+1}/{num_segments}...")
+            print(f"Generating segment {segment_idx+1}/{num_segments} ({current_num_frames} frames)...")
 
-        audio_start_idx = audio_start_idx + audio_stride * (num_frames - num_cond_frames)
-        audio_end_idx = audio_start_idx + audio_stride * num_frames
+        audio_start_idx = audio_start_idx + audio_stride * (previous_num_frames - num_cond_frames)
+        audio_end_idx = audio_start_idx + audio_stride * current_num_frames
         center_indices = torch.arange(audio_start_idx, audio_end_idx, audio_stride).unsqueeze(1) + indices.unsqueeze(0)
         center_indices = torch.clamp(center_indices, min=0, max=full_audio_emb.shape[0] - 1)
         audio_emb = full_audio_emb[center_indices][None, ...].to(local_rank)
 
+        segment_started = time.perf_counter()
         output_tuple = pipe.generate_avc(
             video=current_video,
             video_latent=latent,
@@ -423,7 +513,7 @@ def generate(args):
             negative_prompt=negative_prompt,
             height=height,
             width=width,
-            num_frames=num_frames,
+            num_frames=current_num_frames,
             num_cond_frames=num_cond_frames,
             num_inference_steps=num_inference_steps,
             text_guidance_scale=text_guidance_scale,
@@ -467,9 +557,19 @@ def generate(args):
             )
             segment_paths.append(seg_path + ".mp4")
         torch_gc()
+        timings[f"segment_{segment_idx+1}"] = _log_timing(
+            f"segment_{segment_idx+1}", segment_started, global_rank
+        )
 
     if cp_rank == 0 and segment_paths:
+        mux_started = time.perf_counter()
         _concat_and_mux(segment_paths, os.path.join(output_dir, "output"), raw_speech_path)
+        timings["mux"] = _log_timing("mux", mux_started, global_rank)
+
+    timings["total"] = _log_timing("total", total_started, global_rank)
+    if global_rank == 0:
+        summary = ", ".join(f"{name}={seconds:.2f}s" for name, seconds in timings.items())
+        print(f"[longcat][timing] summary: {summary}", flush=True)
 
 
 def _parse_args():
