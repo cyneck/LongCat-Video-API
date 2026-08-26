@@ -204,27 +204,30 @@ def load_quantized_dit(checkpoint_dir: str, subfolder: str = "base_model_int8", 
             parent = getattr(parent, part)
         setattr(parent, parts[-1], ql)
 
-    # Load quantized state dict
+    # Load quantized weights shard-by-shard, streaming each shard directly into
+    # the model instead of accumulating the whole state_dict in host RAM. This
+    # keeps peak CPU memory at ~one shard (~4GB) instead of the full model, which
+    # previously triggered an OOM kill (exitcode -9 / SIGKILL) on large DiT loads.
     index_path = os.path.join(quantized_dir, "quantized_model.safetensors.index.json")
     if os.path.exists(index_path):
         with open(index_path, "r") as f:
             index = json.load(f)
-        # Load from shards
-        shard_files = set(index["weight_map"].values())
-        state_dict = {}
-        for shard_file in sorted(shard_files):
-            shard_path = os.path.join(quantized_dir, shard_file)
-            shard_dict = load_file(shard_path, device="cpu")
-            state_dict.update(shard_dict)
+        shard_files = sorted(set(index["weight_map"].values()))
     else:
         # Single file fallback
-        files = [f for f in os.listdir(quantized_dir) if f.endswith(".safetensors") and "index" not in f]
-        state_dict = {}
-        for f in sorted(files):
-            shard_dict = load_file(os.path.join(quantized_dir, f), device="cpu")
-            state_dict.update(shard_dict)
+        shard_files = sorted(
+            f for f in os.listdir(quantized_dir)
+            if f.endswith(".safetensors") and "index" not in f
+        )
 
-    model.load_state_dict(state_dict, strict=True)
+    for shard_file in shard_files:
+        shard_path = os.path.join(quantized_dir, shard_file)
+        shard_dict = load_file(shard_path, device="cpu")
+        # load this shard's tensors into the model immediately, then drop the
+        # temporary CPU copy so the full checkpoint is never held in RAM at once
+        model.load_state_dict(shard_dict, strict=False)
+        del shard_dict
+
     model.eval()
 
     # Cast non-quantized parameters (Conv3d, LayerNorm, etc.) to bfloat16

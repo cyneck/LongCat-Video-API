@@ -407,6 +407,8 @@ free -h
 ```
 > 装好 `accelerate` 后 `low_cpu_mem_usage=True`，加载峰值内存大幅下降，多数情况即可过加载关。
 > 若装了 `accelerate` 仍 `-9`：说明宿主机 **RAM 本身不够**（容器常有限内存上限）。检查 `free -h` 可用内存；关掉同机其他大进程，或给容器调大内存上限。若 RAM 充足但仍杀，再看是否 **VRAM 不够**：`nvidia-smi` 看显存，INT8 已省显存，但仍可能不够时可调大 `LONGCAT_NUM_GPUS`（上下文并行把模型/激活摊到多卡），或确认 `LONGCAT_USE_INT8=1`。
+>
+> **INT8 DiT 加载器已改为分片流式加载**：`load_quantized_dit`（`longcat_video/modules/quantization.py`）原先会把所有量化分片累加进同一个 CPU 字典再一次性 `load_state_dict`，峰值 CPU 内存 ≈ 整个模型（~28GB），是「`accelerate` 装好后仍在 INT8 步被 SIGKILL」的根因。现已改为**每读一片立刻灌入模型并释放该片**（`load_state_dict(shard_dict, strict=False)` + `del shard_dict`），峰值 CPU 内存降到约一片（~4GB）。该修复对 in-process Worker 与子进程两条路径同时生效。
 
 ---
 
