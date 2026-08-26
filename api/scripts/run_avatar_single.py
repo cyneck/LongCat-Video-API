@@ -104,6 +104,7 @@ def generate(args):
     stage_1 = cfg.get("stage_1", "ai2v")  # at2v / ai2v
     resolution = cfg.get("resolution", "480p")
     num_segments_raw = cfg.get("num_segments", "auto")  # int 或 "auto"（按音频时长自适应）
+    print(f"[longcat][seg] 收到 num_segments={num_segments_raw!r}（'auto'=按音频时长自适应）", flush=True)
     num_inference_steps = int(cfg.get("num_inference_steps", 50))
     text_guidance_scale = float(cfg.get("text_guidance_scale", 4.0))
     audio_guidance_scale = float(cfg.get("audio_guidance_scale", 4.0))
@@ -246,6 +247,7 @@ def generate(args):
             print(f"[longcat][auto] 音频 {source_duration:.1f}s → 自动 {num_segments} 段 (每段推进 {seg_advance:.2f}s)", flush=True)
         else:
             num_segments = max(1, int(num_segments_raw))
+            print(f"[longcat][seg] 使用固定段数 num_segments={num_segments}", flush=True)
 
         generate_duration = num_frames / save_fps + (num_segments - 1) * (num_frames - num_cond_frames) / save_fps
         added_sample_nums = math.ceil((generate_duration - source_duration) * sr)

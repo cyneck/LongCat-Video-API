@@ -375,7 +375,14 @@ async function detectBase() {
     const r = await fetch("/health");
     if (r.ok) { API_BASE = ""; return API_BASE; }
   } catch (e) {}
-  API_BASE = "http://" + location.hostname + ":8000";
+  // 静态页 / 本地打开：file:// 的 location.hostname 为空，不能用 "http://:8000"（畸形地址连不上）。
+  // 默认指向本机 8000；若 API 在远程服务器，请点右上角 ⚙ 填写服务器地址。
+  if (location.protocol === "file:") {
+    API_BASE = "http://localhost:8000";
+  } else {
+    API_BASE = "http://" + location.hostname + ":8000";
+  }
+  setBanner("bad", "未检测到同源 API，已默认指向 " + API_BASE + "；若 API 在远程服务器，请点右上角 ⚙ 填写服务器地址。");
   return API_BASE;
 }
 
@@ -407,7 +414,8 @@ async function checkConn() {
     const info = await api("/health");
     $("#connDot").className = "dot ok";
     $("#connText").textContent = (info.num_gpus || "?") + " GPU · " + (info.version || "");
-    setBanner("ok", "已连接 API：" + (info.service || "") + "（" + (info.num_gpus||"?") + " 卡）");
+    // 把实际使用的 API 地址显示出来，便于核对「API配置」是否真的生效（静态页连错主机一眼可见）
+    setBanner("ok", "已连接 API：" + (API_BASE || location.origin) + "（" + (info.num_gpus||"?") + " 卡）");
     setTimeout(() => setBanner("", ""), 2600);
     loadHistory();
   } catch (e) {
@@ -702,10 +710,13 @@ $("#gearBtn").addEventListener("click", () => {
 });
 $("#settingsMask").addEventListener("click", (e) => { if (e.target === $("#settingsMask")) $("#settingsMask").classList.remove("show"); });
 $("#saveApi").addEventListener("click", () => {
-  API_BASE = $("#apiBase").value.trim() || "http://localhost:8000";
+  let v = $("#apiBase").value.trim();
+  if (!v) v = "http://localhost:8000";
+  if (!/^https?:\/\//i.test(v)) v = "http://" + v;  // 自动补全协议
+  API_BASE = v.replace(/\/+$/, "");                 // 去掉结尾多余斜杠
   localStorage.setItem("lc_api_base", API_BASE);
   $("#settingsMask").classList.remove("show");
-  toast("已保存 API 地址");
+  toast("已保存 API 地址：" + API_BASE);
   checkConn();
 });
 

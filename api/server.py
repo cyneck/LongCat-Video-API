@@ -157,7 +157,11 @@ def _enqueue(task_type: str, task_input: dict):
 @app.get("/")
 def root():
     if config.EMBED_H5 and (config.H5_DIR / "index.html").exists():
-        return FileResponse(str(config.H5_DIR / "index.html"))
+        # no-store：避免浏览器缓存旧 H5 导致「片段数=auto」等前端更新不生效
+        return FileResponse(
+            str(config.H5_DIR / "index.html"),
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
     return _service_info()
 
 
