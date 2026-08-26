@@ -205,8 +205,10 @@ A100_40G_PROFILE_ENABLED = _as_bool(
 )
 A100_40G = {
     "max_resolution": _env_or_cfg("profile", "max_resolution", "LONGCAT_A100_40G_MAX_RESOLUTION", "480p"),
+    # max_num_segments: 0 = 不限制。段数走滑动窗口串行（每段独立前向、用完即释放显存/内存），
+    # 不额外占用显存，仅影响总生成耗时；生产若担心超长音频任务耗时爆炸，可设为上限值。
     "max_num_segments": _as_int(
-        _env_or_cfg("profile", "max_num_segments", "LONGCAT_A100_40G_MAX_SEGMENTS", "1"), 1
+        _env_or_cfg("profile", "max_num_segments", "LONGCAT_A100_40G_MAX_SEGMENTS", "0"), 0
     ),
     "forced_num_inference_steps": _as_int(
         _env_or_cfg("profile", "forced_num_inference_steps", "LONGCAT_A100_40G_STEPS", "8"), 8

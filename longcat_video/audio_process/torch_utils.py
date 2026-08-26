@@ -162,7 +162,7 @@ def get_audio_duration(audio_path):
     return float(info["format"]["duration"])
 
 
-def save_video_ffmpeg(gen_video_samples, save_path, audio_path, fps=25, quality=5, high_quality_save=False):
+def save_video_ffmpeg(gen_video_samples, save_path, audio_path=None, fps=25, quality=5, high_quality_save=False):
 
     def save_video(frames, save_path, fps, quality=9, ffmpeg_params=None):
         writer = imageio.get_writer(
@@ -210,6 +210,13 @@ def save_video_ffmpeg(gen_video_samples, save_path, audio_path, fps=25, quality=
 
     # generate video with audio
     save_path = save_path + ".mp4"
+    if audio_path is None:
+        # 纯视频模式：不 mux 音频，直接输出。多段拼接场景由调用方最后统一 mux 一次完整音频，
+        # 既避免逐段重复/错位 mux，也保证内存只有「单段」级别（每段落盘即释放）。
+        if os.path.exists(save_path):
+            os.remove(save_path)
+        os.rename(save_path_tmp, save_path)
+        return save_path
     if high_quality_save:
         final_command = [
             "ffmpeg",

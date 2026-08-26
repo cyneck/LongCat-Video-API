@@ -27,6 +27,12 @@ from longcat_video.audio_process import get_audio_encoder, get_audio_feature_ext
 from longcat_video.audio_process.torch_utils import save_video_ffmpeg
 from audio_separator.separator import Separator
 
+import subprocess
+try:
+    from api import config
+except Exception:
+    import config
+
 
 DEFAULT_NEGATIVE_PROMPT = (
     "Close-up, Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, "
@@ -40,6 +46,33 @@ DEFAULT_NEGATIVE_PROMPT = (
 def torch_gc():
     torch.cuda.empty_cache()
     torch.cuda.ipc_collect()
+
+
+def _concat_and_mux(segment_paths, output_base, audio_path):
+    """ffmpeg concat 各段纯视频 + 一次性 mux 完整音频 → output_base+'.mp4'。
+
+    全程磁盘操作，内存仅「单段」级别（每段已落盘即释放），契合滑动窗口串行：
+    段数只影响总耗时，不额外占用显存/内存，故可在不溢出的前提下处理任意时长音频。
+    """
+    list_path = output_base + ".concat.txt"
+    with open(list_path, "w") as f:
+        for p in segment_paths:
+            f.write(f"file '{os.path.abspath(p)}'\n")
+    merged = output_base + ".merged.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", merged],
+        check=True,
+    )
+    final = output_base + ".mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", merged, "-i", audio_path,
+         "-c", "copy", "-map", "0:v:0", "-map", "1:a:0", "-shortest", final],
+        check=True,
+    )
+    for p in (list_path, merged):
+        if os.path.exists(p):
+            os.remove(p)
+    return final
 
 
 def generate_random_uid():
@@ -70,7 +103,7 @@ def generate(args):
     image_path = cfg.get("cond_image")  # None for at2v
     stage_1 = cfg.get("stage_1", "ai2v")  # at2v / ai2v
     resolution = cfg.get("resolution", "480p")
-    num_segments = max(1, int(cfg.get("num_segments", 1)))
+    num_segments_raw = cfg.get("num_segments", "auto")  # int 或 "auto"（按音频时长自适应）
     num_inference_steps = int(cfg.get("num_inference_steps", 50))
     text_guidance_scale = float(cfg.get("text_guidance_scale", 4.0))
     audio_guidance_scale = float(cfg.get("audio_guidance_scale", 4.0))
@@ -85,6 +118,7 @@ def generate(args):
     context_parallel_size = args.context_parallel_size
     output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
+    segment_paths = []  # 各段纯视频路径，最后统一 concat + mux 完整音频（内存仅单段级别）
 
     if use_distill and model_type == "avatar-v1.5":
         num_inference_steps = 8
@@ -194,9 +228,26 @@ def generate(args):
         temp_vocal_path = extract_vocal_from_speech(raw_speech_path, f"/tmp/temp_speech_{generate_random_uid()}_{global_rank}_vocal.wav", vocal_separator, audio_output_dir_temp)
         assert temp_vocal_path is not None and os.path.exists(temp_vocal_path), "No vocal detected"
 
-        generate_duration = num_frames / save_fps + (num_segments - 1) * (num_frames - num_cond_frames) / save_fps
         speech_array, sr = librosa.load(temp_vocal_path, sr=16000)
         source_duration = len(speech_array) / sr
+
+        # --- 自适应段数（audio 模式）：按音频时长算，不硬编码魔法数 ---
+        if isinstance(num_segments_raw, str) and num_segments_raw.strip().lower() == "auto":
+            first_seg_dur = num_frames / save_fps
+            seg_advance = (num_frames - num_cond_frames) / save_fps
+            if source_duration <= first_seg_dur:
+                num_segments = 1
+            else:
+                num_segments = 1 + math.ceil((source_duration - first_seg_dur) / seg_advance)
+            _max_seg = config.A100_40G.get("max_num_segments", 0)
+            if _max_seg and _max_seg > 0 and num_segments > _max_seg:
+                print(f"[longcat][auto] num_segments={num_segments} 超过 profile 上限，封顶为 {_max_seg}", flush=True)
+                num_segments = _max_seg
+            print(f"[longcat][auto] 音频 {source_duration:.1f}s → 自动 {num_segments} 段 (每段推进 {seg_advance:.2f}s)", flush=True)
+        else:
+            num_segments = max(1, int(num_segments_raw))
+
+        generate_duration = num_frames / save_fps + (num_segments - 1) * (num_frames - num_cond_frames) / save_fps
         added_sample_nums = math.ceil((generate_duration - source_duration) * sr)
         if added_sample_nums > 0:
             speech_array = np.append(speech_array, [0.0] * added_sample_nums)
@@ -260,8 +311,9 @@ def generate(args):
         video = [PIL.Image.fromarray(img) for img in video]
 
         if cp_rank == 0:
-            output_tensor = torch.from_numpy(np.array(video))
-            save_video_ffmpeg(output_tensor, os.path.join(output_dir, "segment_1"), raw_speech_path, fps=save_fps, quality=5)
+            seg_path = os.path.join(output_dir, "segment_1")
+            save_video_ffmpeg(torch.from_numpy(np.array(video)), seg_path, audio_path=None, fps=save_fps, quality=5)
+            segment_paths.append(seg_path + ".mp4")
         del output
         torch_gc()
 
@@ -287,8 +339,9 @@ def generate(args):
         video = [PIL.Image.fromarray(img) for img in video]
 
         if cp_rank == 0:
-            output_tensor = torch.from_numpy(np.array(video))
-            save_video_ffmpeg(output_tensor, os.path.join(output_dir, "segment_1"), raw_speech_path, fps=save_fps, quality=5)
+            seg_path = os.path.join(output_dir, "segment_1")
+            save_video_ffmpeg(torch.from_numpy(np.array(video)), seg_path, audio_path=None, fps=save_fps, quality=5)
+            segment_paths.append(seg_path + ".mp4")
         del output
         torch_gc()
     else:
@@ -341,19 +394,17 @@ def generate(args):
         new_video = [PIL.Image.fromarray(img) for img in new_video]
         del output
 
-        all_generated_frames.extend(new_video[num_cond_frames:])
         current_video = new_video
 
         if cp_rank == 0:
-            output_tensor = torch.from_numpy(np.array(all_generated_frames))
-            save_video_ffmpeg(output_tensor, os.path.join(output_dir, f"video_continue_{segment_idx+1}"), raw_speech_path, fps=save_fps, quality=5)
-            del output_tensor
+            seg_path = os.path.join(output_dir, f"video_continue_{segment_idx+1}")
+            save_video_ffmpeg(torch.from_numpy(np.array(new_video)), seg_path, audio_path=None, fps=save_fps, quality=5)
+            segment_paths.append(seg_path + ".mp4")
+        torch_gc()
 
-    # final merged output (segment_1)
-    if cp_rank == 0 and num_segments == 1:
-        final_src = os.path.join(output_dir, "segment_1.mp4")
-        if os.path.exists(final_src):
-            os.symlink(os.path.basename(final_src), os.path.join(output_dir, "output.mp4"))
+    # 合并所有段纯视频 + 一次性 mux 完整音频（滑动窗口串行：内存仅单段级别，不溢出）
+    if cp_rank == 0 and segment_paths:
+        _concat_and_mux(segment_paths, os.path.join(output_dir, "output"), raw_speech_path)
 
 
 def _parse_args():

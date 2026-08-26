@@ -35,7 +35,7 @@ free -h
 ```text
 model_type            avatar-v1.5
 resolution            480p
-num_segments          1
+num_segments          auto  (按音频时长自适应；滑动窗口串行，不额外占显存)
 num_inference_steps   8
 use_distill           true
 use_int8              true
@@ -44,7 +44,7 @@ audio_guidance_scale  1.0
 GPU concurrency       1
 ```
 
-即使旧版 H5 / 客户端仍显式提交 `50 steps / distill=false / int8=false`，后端也会把 Avatar 1.5 归一化到上述低显存档位，避免误走 BF16 高显存路径。
+即使旧版 H5 / 客户端仍显式提交 `50 steps / distill=false / int8=false`，后端也会把 Avatar 1.5 归一化到上述低显存档位（分辨率/步数/INT8/蒸馏），避免误走 BF16 高显存路径。**段数默认 `auto`：会按你上传音频的真实时长自动算需要多少段、拼成完整视频**，不再被压成固定 1 段。
 
 若部署在 A100 80GB / H100 / 多卡环境，需要恢复完全由调用方控制，可设置：
 
@@ -277,7 +277,7 @@ export LONGCAT_CHECKPOINT_DIR_AVATAR_V15=/path/to/LongCat-Video-Avatar-1.5
 | `LONGCAT_CONTEXT_PARALLEL_SIZE` | 跟随 GPU 数 | `1` | Context Parallel 大小 |
 | `LONGCAT_GPU_CONCURRENCY` | `1` | **`1`** | A100 40GB 不要并发跑多个生成任务 |
 | `LONGCAT_ENABLE_COMPILE` | `0` | `0` | 首轮 smoke test 保持关闭 |
-| `LONGCAT_A100_40G_PROFILE` | `1` | **`1`** | Avatar 1.5 安全封顶：强制 INT8+8 步蒸馏、分辨率/段数封顶（只降不升），不再静默覆盖 guidance；子参数见 `config.toml [profile]` |
+| `LONGCAT_A100_40G_PROFILE` | `1` | **`1`** | Avatar 1.5 安全封顶：强制 INT8+8 步蒸馏、分辨率封顶（只降不升）；**段数默认 `auto` 按音频时长自适应（与显存无关）**；不再静默覆盖 guidance；子参数见 `config.toml [profile]` |
 | `LONGCAT_WORK_DIR` | `./api_work` | 默认即可 | 上传 / 输出 / 日志目录 |
 | `LONGCAT_CHECKPOINT_DIR_VIDEO` | `weights/LongCat-Video` | 按实际路径 | 基础模型 |
 | `LONGCAT_CHECKPOINT_DIR_AVATAR_V1` | `weights/LongCat-Video-Avatar` | 可不下载 | Avatar v1.0 |
@@ -538,7 +538,7 @@ hf download meituan-longcat/LongCat-Video-Avatar-1.5 \
 ```text
 model_type=avatar-v1.5
 resolution=480p
-num_segments=1
+num_segments=auto          # 或不传：按音频时长自动生成完整视频（如 21s 音频→约 7 段）
 use_int8=true
 use_distill=true
 num_inference_steps=8
@@ -614,7 +614,7 @@ python -c 'import torch; print(torch.cuda.is_available(), torch.cuda.get_device_
 - `api/scripts/run_avatar_single.py`：`get_audio_embedding` 之后 `pipe.audio_encoder.to("cpu")` + `torch.cuda.empty_cache()`；
 - `longcat_video/pipeline_longcat_video_avatar.py`：`encode_prompt` 末尾 `self.text_encoder.to("cpu")` + `torch.cuda.empty_cache()`。
 两者合计释放 ~5-6GB，远超所需几百 MiB，推理即可通过。**无需调小分辨率/帧数，也无需关蒸馏。**
-若仍有极小概率 OOM：① 确认 `LONGCAT_A100_40G_PROFILE=1`（强制 480p/单段/8 步）；② 关掉同卡其他进程；③ 多卡时调大 `LONGCAT_NUM_GPUS` / `LONGCAT_CONTEXT_PARALLEL_SIZE` 把激活摊到多卡；④ 临时关闭蒸馏（`LONGCAT_A100_40G_PROFILE=0` 并在请求里 `use_distill=false`，代价是回到 50 步采样、更慢）。
+若仍有极小概率 OOM：① 确认 `LONGCAT_A100_40G_PROFILE=1`（强制 480p/8 步）；② 关掉同卡其他进程；③ 多卡时调大 `LONGCAT_NUM_GPUS` / `LONGCAT_CONTEXT_PARALLEL_SIZE` 把激活摊到多卡；④ 临时关闭蒸馏（`LONGCAT_A100_40G_PROFILE=0` 并在请求里 `use_distill=false`，代价是回到 50 步采样、更慢）。
 
 ---
 

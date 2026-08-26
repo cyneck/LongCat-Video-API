@@ -16,7 +16,7 @@ Set LONGCAT_A100_40G_PROFILE=0 on larger systems to disable the clamp entirely.
 """
 import os
 import logging
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Union
 from pydantic import BaseModel, Field, model_validator
 
 from . import config
@@ -104,7 +104,9 @@ class _Avatar40GDefaults(BaseModel):
         if cur and cap and (cur[0] > cap[0] or cur[1] > cap[1]):
             self.resolution = p["max_resolution"]
             changed.append(f"resolution 封顶 {p['max_resolution']}")
-        if self.num_segments > p["max_num_segments"]:
+        # 段数：仅当调用方传整数、且配置了上限(max>0)时做封顶；'auto' 字符串保留，
+        # 交由 run 脚本按音频时长计算（滑动窗口串行，不额外占显存，无需强制压成 1）。
+        if isinstance(self.num_segments, int) and p["max_num_segments"] > 0 and self.num_segments > p["max_num_segments"]:
             self.num_segments = p["max_num_segments"]
             changed.append(f"num_segments 封顶 {p['max_num_segments']}")
 
@@ -122,7 +124,7 @@ class AvatarSingleRequest(_Avatar40GDefaults):
     cond_image: Optional[str] = Field(None, description="required when stage_1='ai2v'")
     stage_1: str = Field("ai2v", pattern="^(at2v|ai2v)$")
     resolution: str = "480p"
-    num_segments: int = Field(1, ge=1, le=10)
+    num_segments: Union[int, str] = Field("auto", description="视频段数：整数或 'auto'（按音频时长自动计算）")
     num_inference_steps: int = Field(8, ge=1, le=100)
     text_guidance_scale: float = config.A100_40G["text_guidance_scale"]
     audio_guidance_scale: float = config.A100_40G["audio_guidance_scale"]
@@ -143,7 +145,7 @@ class AvatarMultiRequest(_Avatar40GDefaults):
     audio_type: str = Field("para", pattern="^(para|add)$")
     bbox: Optional[Dict[str, List[int]]] = None
     resolution: str = "480p"
-    num_segments: int = Field(1, ge=1, le=10)
+    num_segments: Union[int, str] = Field("auto", description="视频段数：整数或 'auto'（按音频时长自动计算）")
     num_inference_steps: int = Field(8, ge=1, le=100)
     text_guidance_scale: float = config.A100_40G["text_guidance_scale"]
     audio_guidance_scale: float = config.A100_40G["audio_guidance_scale"]
