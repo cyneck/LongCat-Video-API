@@ -13,8 +13,9 @@ nvidia-ml-py==13.580.65
 tzdata==2025.2
 onnx==1.18.0
 # GPU 版 ORT 同时包含 CPU fallback；不要与 `onnxruntime` CPU 包同时安装。
-# 1.20.x 使用 CUDA 12.x + cuDNN 9，与本项目 PyTorch 2.6.0+cu124 匹配。
-onnxruntime-gpu==1.20.1
+# 1.26.x 使用 CUDA 12.x + cuDNN 9，与本项目 PyTorch 2.6.0+cu124 匹配；
+# 1.27+ 默认已转向 CUDA 13，因此本 CUDA 12 部署固定在 1.26.x。
+onnxruntime-gpu==1.26.0
 # tritonserverclient 是 NVIDIA Triton 推理服务客户端，PyPI 无此包名/版本，
 # 且本仓库本地数字人生成不依赖 Triton 服务，故移除。
 openai==1.75.0
