@@ -124,6 +124,8 @@ class LongCatVideoAvatarPipeline:
     ):
         self.vae = vae
         self.text_encoder = text_encoder
+        self.text_encoder_d_model = int(text_encoder.config.d_model)
+        self.text_encoder_dtype = text_encoder.dtype
         self.tokenizer = tokenizer
         self.scheduler = scheduler
         self.dit = dit 
@@ -154,7 +156,9 @@ class LongCatVideoAvatarPipeline:
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
     ):
-        dtype = dtype or self.text_encoder.dtype
+        if self.text_encoder is None:
+            raise RuntimeError("text encoder was offloaded; use cached prompt embeddings")
+        dtype = dtype or self.text_encoder_dtype
 
         prompt = [prompt] if isinstance(prompt, str) else prompt
         prompt = [prompt_clean(u) for u in prompt]
@@ -411,7 +415,7 @@ class LongCatVideoAvatarPipeline:
     def _cache_clean_latents(self, cond_latents, model_max_length, offload_kv_cache, device, dtype, audio_embs, num_cond_latents, num_ref_latents, ref_img_index):
         timestep = torch.zeros(cond_latents.shape[0], cond_latents.shape[2]).to(device=device, dtype=dtype)
         # make null prompt tensor(skip_crs_attn=True, so tensors below will not be actually used)
-        empty_embeds = torch.zeros([cond_latents.shape[0], 1, model_max_length, self.text_encoder.config.d_model], device=device, dtype=dtype)
+        empty_embeds = torch.zeros([cond_latents.shape[0], 1, model_max_length, self.text_encoder_d_model], device=device, dtype=dtype)
         _, kv_cache_dict = self.dit(
             hidden_states=cond_latents, 
             timestep=timestep, 
@@ -767,7 +771,7 @@ class LongCatVideoAvatarPipeline:
                     context_parallel_util.cp_broadcast(negative_prompt_embeds)
                     context_parallel_util.cp_broadcast(negative_prompt_attention_mask)
         elif context_parallel_util.get_cp_size() > 1:
-            caption_channels = self.text_encoder.config.d_model
+            caption_channels = self.text_encoder_d_model
             prompt_embeds = torch.zeros([batch_size, 1, max_sequence_length, caption_channels], dtype=dit_dtype, device=device)
             prompt_attention_mask = torch.zeros([batch_size, max_sequence_length], dtype=torch.int64, device=device)
             context_parallel_util.cp_broadcast(prompt_embeds)
@@ -1006,7 +1010,7 @@ class LongCatVideoAvatarPipeline:
                     context_parallel_util.cp_broadcast(negative_prompt_embeds)
                     context_parallel_util.cp_broadcast(negative_prompt_attention_mask)
         elif context_parallel_util.get_cp_size() > 1:
-            caption_channels = self.text_encoder.config.d_model
+            caption_channels = self.text_encoder_d_model
             prompt_embeds = torch.zeros([batch_size, 1, max_sequence_length, caption_channels], dtype=dit_dtype, device=device)
             prompt_attention_mask = torch.zeros([batch_size, max_sequence_length], dtype=torch.int64, device=device)
             context_parallel_util.cp_broadcast(prompt_embeds)
@@ -1308,7 +1312,7 @@ class LongCatVideoAvatarPipeline:
                     context_parallel_util.cp_broadcast(negative_prompt_embeds)
                     context_parallel_util.cp_broadcast(negative_prompt_attention_mask)
         elif context_parallel_util.get_cp_size() > 1:
-            caption_channels = self.text_encoder.config.d_model
+            caption_channels = self.text_encoder_d_model
             prompt_embeds = torch.zeros([batch_size, 1, max_sequence_length, caption_channels], dtype=dit_dtype, device=device)
             prompt_attention_mask = torch.zeros([batch_size, max_sequence_length], dtype=torch.int64, device=device)
             context_parallel_util.cp_broadcast(prompt_embeds)
@@ -1547,4 +1551,19 @@ class LongCatVideoAvatarPipeline:
         if self.vae is not None:
             self.vae = self.vae.to(device, non_blocking=True)
         return self
-    
+
+    def offload_text_encoder(self):
+        """Release UMT5 while retaining continuation-safe shape metadata."""
+        if self.text_encoder is not None:
+            self.text_encoder.to("cpu")
+            self.text_encoder = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    def offload_audio_encoder(self):
+        """Release the audio encoder after full-track features are cached."""
+        if self.audio_encoder is not None:
+            self.audio_encoder.to("cpu")
+            self.audio_encoder = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()

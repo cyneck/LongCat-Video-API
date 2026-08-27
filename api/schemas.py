@@ -82,6 +82,12 @@ class _Avatar40GDefaults(BaseModel):
 
     @model_validator(mode="after")
     def apply_a100_40g_profile(self):
+        if self.model_type == "avatar-v1.0":
+            # These checkpoints/features only exist for v1.5. Normalize old
+            # clients as well as the H5 UI so v1.0 never carries stale flags.
+            self.use_int8 = False
+            self.use_distill = False
+            return self
         if not _a100_40g_profile_enabled() or self.model_type != "avatar-v1.5":
             return self
         p = config.LOW_VRAM

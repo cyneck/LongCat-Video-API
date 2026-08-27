@@ -616,6 +616,12 @@ python -c 'import torch; print(torch.cuda.is_available(), torch.cuda.get_device_
 两者合计释放 ~5-6GB，远超所需几百 MiB，推理即可通过。**无需调小分辨率/帧数，也无需关蒸馏。**
 若仍有极小概率 OOM：① 确认 `LONGCAT_A100_40G_PROFILE=1`（强制 480p/8 步）；② 关掉同卡其他进程；③ 多卡时调大 `LONGCAT_NUM_GPUS` / `LONGCAT_CONTEXT_PARALLEL_SIZE` 把激活摊到多卡；④ 临时关闭蒸馏（`LONGCAT_A100_40G_PROFILE=0` 并在请求里 `use_distill=false`，代价是回到 50 步采样、更慢）。
 
+### Avatar v1.0：单卡 A100 40GB
+
+v1.0 使用 BF16 DiT，没有 v1.5 的 INT8/DMD checkpoint。API worker 因此采用严格的阶段式 GPU 生命周期：先缓存 prompt embeddings 并卸载 UMT5；人声分离后销毁 ONNX session/CUDA arena；完整 Wav2Vec2 embeddings 写回 CPU 后卸载音频编码器；最后才让 BF16 DiT 常驻 GPU，并按生成需要使用 VAE。不会再调用一次性 `pipe.to(cuda)` 将 UMT5、Wav2Vec2、VAE 和 DiT 同时搬上卡。
+
+H5 选择 `avatar-v1.0` 时会隐藏并禁用 `use_int8`/`use_distill`，请求 schema 也会把旧客户端传来的两个值归一化为 `false`。任务进度会依次报告 `text_encode`、`audio_features`、`dit_ready`、`segment_N` 和 `mux`。
+
 ---
 
 ## 10. 目录与产物

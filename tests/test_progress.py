@@ -1,4 +1,5 @@
 from api.progress import PROGRESS_PREFIX, ProgressSnapshot, parse_progress
+from api.progress import _segment_done_percent, _segment_start_percent
 
 
 def event(percent, stage, detail="", current=0, total=0, version=1):
@@ -31,6 +32,11 @@ def test_progress_is_monotonic():
     fallback = ProgressSnapshot(70, "video_generation", "segment 2", 2, 4)
     text = "\n".join([event(30, "audio_separation"), event(60, "video_generation")])
     assert parse_progress(text, fallback) == fallback
+
+
+def test_avatar_segment_progress_follows_dit_ready():
+    assert _segment_start_percent(1, 2) > 50
+    assert _segment_done_percent(2, 2) == 90
 
 
 def test_bad_json_and_unknown_version_are_ignored():

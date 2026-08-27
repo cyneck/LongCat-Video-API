@@ -26,12 +26,15 @@ STAGE_LABELS = {
     "queued": "排队中",
     "starting": "启动任务",
     "model_loading": "加载模型",
+    "text_encode": "编码文本",
+    "dit_ready": "DiT 就绪",
     "model_ready": "模型就绪",
     "audio_separation": "人声分离",
     "audio_features": "音频特征",
     "audio_ready": "音频特征完成",
     "video_generation": "生成视频",
     "muxing": "合并封装",
+    "mux": "合并封装",
     "completed": "已完成",
     "failed": "任务失败",
 }
@@ -107,13 +110,13 @@ def parse_progress(log_text: str, fallback: ProgressSnapshot | None = None) -> P
 def _segment_start_percent(current: int, total: int) -> int:
     total = max(1, int(total))
     current = max(1, min(int(current), total))
-    return min(89, 45 + round(45 * (current - 1) / total))
+    return min(89, 55 + round(35 * (current - 1) / total))
 
 
 def _segment_done_percent(current: int, total: int) -> int:
     total = max(1, int(total))
     current = max(1, min(int(current), total))
-    return min(90, 45 + round(45 * current / total))
+    return min(90, 55 + round(35 * current / total))
 
 
 def install_worker_progress_hooks(module) -> None:
@@ -160,7 +163,7 @@ def install_worker_progress_hooks(module) -> None:
                     total = state["total_segments"] or current
                     progress_event(
                         _segment_start_percent(current, total),
-                        "video_generation",
+                        f"segment_{current}",
                         f"正在生成第 {current}/{total} 段",
                         current_segment=current,
                         total_segments=total,
@@ -175,11 +178,11 @@ def install_worker_progress_hooks(module) -> None:
         def timed(name, started_at, rank=0):
             elapsed = original_timing(name, started_at, rank)
             if name == "model_load":
-                progress_event(25, "model_ready", "模型加载完成，准备音频预处理", rank=rank)
+                progress_event(50, "dit_ready", "DiT 已驻留 GPU，其他大模型已卸载", rank=rank)
             elif name == "vocal_separation":
                 progress_event(35, "audio_features", "人声分离完成，正在提取音频特征", rank=rank)
             elif name == "audio_embedding":
-                progress_event(45, "audio_ready", "音频特征已完成，准备生成视频", rank=rank)
+                progress_event(40, "audio_features", "完整音频特征已缓存到 CPU", rank=rank)
             elif name.startswith("segment_"):
                 m = re.fullmatch(r"segment_(\d+)", name)
                 if m:
@@ -187,14 +190,14 @@ def install_worker_progress_hooks(module) -> None:
                     total = state["total_segments"] or current
                     progress_event(
                         _segment_done_percent(current, total),
-                        "video_generation",
+                        f"segment_{current}",
                         f"第 {current}/{total} 段已完成",
                         current_segment=current,
                         total_segments=total,
                         rank=rank,
                     )
             elif name == "mux":
-                progress_event(95, "muxing", "视频片段已生成，正在拼接并封装音频", rank=rank)
+                progress_event(95, "mux", "视频片段已生成，正在拼接并封装音频", rank=rank)
             return elapsed
         module._log_timing = timed
 

@@ -28,6 +28,7 @@ from longcat_video.context_parallel import context_parallel_util
 from longcat_video.audio_process import get_audio_encoder, get_audio_feature_extractor
 from longcat_video.audio_process.torch_utils import save_video_ffmpeg
 from audio_separator.separator import Separator
+from api.progress import progress_event
 
 try:
     from api import config
@@ -384,7 +385,7 @@ def generate(args):
         checkpoint_dir,
         "whisper-large-v3" if model_type == "avatar-v1.5" else "chinese-wav2vec2-base",
     )
-    audio_encoder = get_audio_encoder(audio_model_checkpoint_path, model_type).to(local_rank)
+    audio_encoder = get_audio_encoder(audio_model_checkpoint_path, model_type)
     audio_feature_extractor = get_audio_feature_extractor(audio_model_checkpoint_path, model_type)
 
     pipe = LongCatVideoAvatarPipeline(
@@ -397,10 +398,6 @@ def generate(args):
         audio_feature_extractor=audio_feature_extractor,
         model_type=model_type,
     )
-    pipe.to(local_rank)
-    timings["model_load"] = _log_timing("model_load", model_started, global_rank)
-    _log_memory("after_model_load", global_rank)
-
     original_encode_prompt = pipe.encode_prompt
     prompt_cache = {}
 
@@ -417,14 +414,28 @@ def generate(args):
         cached = prompt_cache.get(cache_key)
         if cached is not None:
             print("[longcat][prompt] reuse cached prompt embeddings", flush=True)
-            return cached
+            device = encode_kwargs.get("device", local_rank)
+            return tuple(t.to(device) if isinstance(t, torch.Tensor) else t for t in cached)
         encoded = original_encode_prompt(*encode_args, **encode_kwargs)
         prompt_cache[cache_key] = tuple(
-            tensor.detach() if isinstance(tensor, torch.Tensor) else tensor for tensor in encoded
+            tensor.detach().to("cpu") if isinstance(tensor, torch.Tensor) else tensor for tensor in encoded
         )
-        return prompt_cache[cache_key]
+        return encoded
 
     pipe.encode_prompt = cached_encode_prompt
+
+    if model_type == "avatar-v1.0":
+        progress_event(15, "text_encode", "正在编码并缓存提示词", rank=global_rank)
+        pipe.text_encoder.to(local_rank)
+        pipe.encode_prompt(prompt=prompt, negative_prompt=negative_prompt,
+                           do_classifier_free_guidance=True, dtype=dit.dtype, device=local_rank)
+        pipe.offload_text_encoder()
+        text_encoder = None
+        progress_event(20, "text_encode", "提示词 embeddings 已缓存，UMT5 已卸载", rank=global_rank)
+    else:
+        pipe.to(local_rank)
+        timings["model_load"] = _log_timing("model_load", model_started, global_rank)
+        _log_memory("after_model_load", global_rank)
 
     generator = torch.Generator(device=local_rank)
     generator.manual_seed(seed + global_rank)
@@ -471,6 +482,11 @@ def generate(args):
         right_temp = extract_vocal_from_speech(right_raw_speech_path, right_temp, vocal_separator, audio_output_dir_temp)
         timings["vocal_separation"] = _log_timing("vocal_separation", separation_started, global_rank)
 
+        del vocal_separator
+        vocal_separator = None
+        gc.collect()
+        torch_gc()
+        pipe.audio_encoder.to(local_rank)
         audio_started = time.perf_counter()
         left_drive, right_drive, merge_speech = audio_prepare_multi(
             left_temp,
@@ -516,13 +532,20 @@ def generate(args):
     elif cp_size > 1:
         raise NotImplementedError("Optimized avatar-multi path currently targets single-GPU cp_size=1")
 
-    del vocal_separator
-    pipe.audio_encoder = None
+    if vocal_separator is not None:
+        del vocal_separator
+    pipe.offload_audio_encoder()
     pipe.audio_feature_extractor = None
     audio_encoder = None
     audio_feature_extractor = None
     gc.collect()
     torch_gc()
+    pipe.dit.to(local_rank)
+    pipe.vae.to(local_rank)
+    pipe.device = local_rank
+    if model_type == "avatar-v1.0":
+        timings["model_load"] = _log_timing("model_load", model_started, global_rank)
+        _log_memory("after_model_load", global_rank)
     _log_memory("after_audio_release", global_rank)
 
     indices = torch.arange(5) - 2

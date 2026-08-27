@@ -1,4 +1,5 @@
 import os
+import gc
 import json
 import time
 import math
@@ -29,6 +30,7 @@ import librosa
 from longcat_video.audio_process import get_audio_encoder, get_audio_feature_extractor
 from longcat_video.audio_process.torch_utils import save_video_ffmpeg
 from audio_separator.separator import Separator
+from api.progress import progress_event
 
 import subprocess
 try:
@@ -256,7 +258,7 @@ def generate(args):
         audio_model_checkpoint_path = os.path.join(checkpoint_dir, "chinese-wav2vec2-base")
     elif model_type == "avatar-v1.5":
         audio_model_checkpoint_path = os.path.join(checkpoint_dir, "whisper-large-v3")
-    audio_encoder = get_audio_encoder(audio_model_checkpoint_path, model_type).to(local_rank)
+    audio_encoder = get_audio_encoder(audio_model_checkpoint_path, model_type)
     audio_feature_extractor = get_audio_feature_extractor(audio_model_checkpoint_path, model_type)
 
     vocal_separator_path = os.path.join(checkpoint_dir, "vocal_separator/Kim_Vocal_2.onnx")
@@ -264,15 +266,7 @@ def generate(args):
     os.makedirs(audio_output_dir_temp, exist_ok=True)
     audio_separator_model_path = os.path.dirname(vocal_separator_path)
     audio_separator_model_name = os.path.basename(vocal_separator_path)
-    _log_onnx_provider_status(global_rank)
-    separator_init_started = time.perf_counter()
-    vocal_separator = Separator(
-        output_dir=audio_output_dir_temp / "vocals",
-        output_single_stem="vocals",
-        model_file_dir=audio_separator_model_path,
-    )
-    vocal_separator.load_model(audio_separator_model_name)
-    timings["separator_init"] = _log_timing("separator_init", separator_init_started, global_rank)
+    vocal_separator = None
 
     pipe = LongCatVideoAvatarPipeline(
         tokenizer=tokenizer,
@@ -284,9 +278,6 @@ def generate(args):
         audio_feature_extractor=audio_feature_extractor,
         model_type=model_type,
     )
-    pipe.to(local_rank)
-    timings["model_load"] = _log_timing("model_load", model_started, global_rank)
-
     original_encode_prompt = pipe.encode_prompt
     prompt_cache = {}
 
@@ -303,14 +294,37 @@ def generate(args):
         cached = prompt_cache.get(cache_key)
         if cached is not None:
             print("[longcat][prompt] reuse cached prompt embeddings", flush=True)
-            return cached
+            device = encode_kwargs.get("device", local_rank)
+            return tuple(t.to(device) if isinstance(t, torch.Tensor) else t for t in cached)
         encoded = original_encode_prompt(*encode_args, **encode_kwargs)
         prompt_cache[cache_key] = tuple(
-            tensor.detach() if isinstance(tensor, torch.Tensor) else tensor for tensor in encoded
+            tensor.detach().to("cpu") if isinstance(tensor, torch.Tensor) else tensor for tensor in encoded
         )
-        return prompt_cache[cache_key]
+        return encoded
 
     pipe.encode_prompt = cached_encode_prompt
+
+    if model_type == "avatar-v1.0":
+        progress_event(15, "text_encode", "正在编码并缓存提示词", rank=global_rank)
+        pipe.text_encoder.to(local_rank)
+        pipe.encode_prompt(prompt=prompt, negative_prompt=negative_prompt,
+                           do_classifier_free_guidance=True, dtype=dit.dtype, device=local_rank)
+        pipe.offload_text_encoder()
+        text_encoder = None
+        progress_event(20, "text_encode", "提示词 embeddings 已缓存，UMT5 已卸载", rank=global_rank)
+    else:
+        pipe.to(local_rank)
+        timings["model_load"] = _log_timing("model_load", model_started, global_rank)
+
+    _log_onnx_provider_status(global_rank)
+    separator_init_started = time.perf_counter()
+    vocal_separator = Separator(
+        output_dir=audio_output_dir_temp / "vocals",
+        output_single_stem="vocals",
+        model_file_dir=audio_separator_model_path,
+    )
+    vocal_separator.load_model(audio_separator_model_name)
+    timings["separator_init"] = _log_timing("separator_init", separator_init_started, global_rank)
 
     generator = torch.Generator(device=local_rank)
     generator.manual_seed(seed + global_rank)
@@ -330,6 +344,10 @@ def generate(args):
         )
         timings["vocal_separation"] = _log_timing("vocal_separation", separation_started, global_rank)
         assert temp_vocal_path is not None and os.path.exists(temp_vocal_path), "No vocal detected"
+        del vocal_separator
+        vocal_separator = None
+        gc.collect()
+        torch_gc()
 
         speech_array, sr = librosa.load(temp_vocal_path, sr=16000)
         vocal_duration = len(speech_array) / sr
@@ -362,6 +380,7 @@ def generate(args):
             speech_array = np.append(speech_array, np.zeros(added_sample_nums, dtype=speech_array.dtype))
 
         audio_embedding_started = time.perf_counter()
+        pipe.audio_encoder.to(local_rank)
         full_audio_emb = pipe.get_audio_embedding(
             speech_array,
             fps=save_fps * audio_stride,
@@ -385,6 +404,8 @@ def generate(args):
             context_parallel_util.cp_broadcast(full_audio_emb_tensor_shape_list)
             context_parallel_util.cp_broadcast(full_audio_emb)
 
+        full_audio_emb = full_audio_emb.to("cpu")
+
         if os.path.exists(temp_vocal_path):
             os.remove(temp_vocal_path)
 
@@ -399,8 +420,18 @@ def generate(args):
         num_segments = max(1, int(num_segments_raw)) if not isinstance(num_segments_raw, str) else 1
         frame_plan = [max_num_frames] * num_segments
 
-    pipe.audio_encoder = pipe.audio_encoder.to("cpu")
-    torch.cuda.empty_cache()
+    if vocal_separator is not None:
+        del vocal_separator
+        vocal_separator = None
+        gc.collect()
+        torch_gc()
+    pipe.offload_audio_encoder()
+    audio_encoder = None
+    pipe.dit.to(local_rank)
+    pipe.vae.to(local_rank)
+    pipe.device = local_rank
+    if model_type == "avatar-v1.0":
+        timings["model_load"] = _log_timing("model_load", model_started, global_rank)
 
     indices = torch.arange(2 * 2 + 1) - 2
     audio_start_idx = 0
