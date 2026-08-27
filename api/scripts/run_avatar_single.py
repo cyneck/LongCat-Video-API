@@ -1,90 +1,54 @@
 """Compatibility entrypoint for avatar-single with standardized task progress.
 
-On the low-VRAM A100 profile, large CPU-loaded components are moved to the
-current CUDA device immediately after loading. The original worker kept UMT5,
-VAE and then DiT resident in host RAM until ``pipe.to(cuda)``, which can trigger
-the Linux/container OOM killer on a 40GB-RAM host before inference starts.
+The low-memory profile keeps large components on CPU while they are being
+assembled, but asks Hugging Face / Diffusers to use their low-CPU-memory loading
+path.  Do NOT move UMT5/VAE/DiT to CUDA eagerly here: doing so makes all large
+components overlap on a 40GB GPU before the pipeline has a chance to offload
+short-lived encoders, which can push startup to ~39.5GiB and OOM.
 """
-import gc
 import os
 
-import torch
 import torch.distributed as dist
 
 from api.progress import install_worker_progress_hooks
 import run_avatar_single_impl as impl
 
 
-def _rss_gb():
-    try:
-        with open("/proc/self/status", "r", encoding="utf-8") as f:
-            for line in f:
-                if line.startswith("VmRSS:"):
-                    return int(line.split()[1]) / 1024 / 1024
-    except Exception:
-        pass
-    return None
-
-
-def _move_loaded_component_to_cuda(name, model):
-    """Move one freshly loaded module off host RAM as early as possible."""
-    if not torch.cuda.is_available():
-        return model
-    try:
-        local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("RANK", "0")))
-    except ValueError:
-        local_rank = 0
-    local_rank %= max(1, torch.cuda.device_count())
-
-    before = _rss_gb()
-    model = model.to(local_rank)
-    gc.collect()
-    torch.cuda.empty_cache()
-    after = _rss_gb()
-    if int(os.environ.get("RANK", "0")) == 0:
-        before_s = f"{before:.2f}GB" if before is not None else "n/a"
-        after_s = f"{after:.2f}GB" if after is not None else "n/a"
-        allocated = torch.cuda.memory_allocated(local_rank) / 1024**3
-        print(
-            f"[longcat][memory] early_cuda_offload component={name} "
-            f"rss_before={before_s} rss_after={after_s} gpu_alloc={allocated:.2f}GB",
-            flush=True,
-        )
-    return model
-
-
-def _install_low_host_ram_load_hooks():
-    """Avoid cumulative CPU residency while loading sharded Avatar components."""
-    low_ram_profile = bool(getattr(impl.config, "LOW_VRAM_PROFILE_ENABLED", False))
-    if not low_ram_profile:
+def _install_balanced_memory_load_hooks():
+    """Reduce host-RAM load peaks without eagerly consuming GPU memory."""
+    if not bool(getattr(impl.config, "LOW_VRAM_PROFILE_ENABLED", False)):
         return
 
     original_t5_from_pretrained = impl.UMT5EncoderModel.from_pretrained
     original_vae_from_pretrained = impl.AutoencoderKLWan.from_pretrained
-    original_load_quantized_dit = impl.load_quantized_dit
 
     class _T5Loader:
         @staticmethod
         def from_pretrained(*args, **kwargs):
+            kwargs.setdefault("low_cpu_mem_usage", True)
             model = original_t5_from_pretrained(*args, **kwargs)
-            return _move_loaded_component_to_cuda("umt5", model)
+            if int(os.environ.get("RANK", "0")) == 0:
+                print("[longcat][memory] loaded component=umt5 mode=low_cpu_mem_usage device=cpu", flush=True)
+            return model
 
     class _VAELoader:
         @staticmethod
         def from_pretrained(*args, **kwargs):
+            kwargs.setdefault("low_cpu_mem_usage", True)
             model = original_vae_from_pretrained(*args, **kwargs)
-            return _move_loaded_component_to_cuda("vae", model)
-
-    def _load_quantized_dit_low_ram(*args, **kwargs):
-        model = original_load_quantized_dit(*args, **kwargs)
-        return _move_loaded_component_to_cuda("dit_int8", model)
+            if int(os.environ.get("RANK", "0")) == 0:
+                print("[longcat][memory] loaded component=vae mode=low_cpu_mem_usage device=cpu", flush=True)
+            return model
 
     impl.UMT5EncoderModel = _T5Loader
     impl.AutoencoderKLWan = _VAELoader
-    impl.load_quantized_dit = _load_quantized_dit_low_ram
+    # INT8 DiT already uses a meta skeleton + shard-by-shard materialization in
+    # longcat_video.modules.quantization.load_quantized_dit.  Leave it on CPU
+    # until the normal pipeline placement step; eager CUDA placement caused the
+    # observed 38.88GiB allocated / 39.49GiB total startup OOM.
 
 
-_install_low_host_ram_load_hooks()
+_install_balanced_memory_load_hooks()
 install_worker_progress_hooks(impl)
 
 
