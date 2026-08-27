@@ -45,8 +45,10 @@ auth_pass = ""
 # 想固定 secret（如多实例共享登录态）就在这里或 LONGCAT_AUTH_TOKEN 设置。
 auth_token = ""
 
-# 是否把内置 H5 演示页 (/h5) 挂载到服务根路径（需前端已构建）。
-embed_h5 = false
+# 启用 FastAPI 内嵌 H5：访问 `/` 时由 FastAPI 返回 h5/index.html，
+# 并动态注入 `/h5/progress.js`，用于显示后端真实任务阶段进度。
+# 环境变量 LONGCAT_EMBED_H5 优先级更高：1=启用，0=关闭。
+embed_h5 = true
 
 # -----------------------------------------------------------------------------
 # 模型权重目录（留空 = 使用默认 <仓库根>/weights/... 布局）
